@@ -254,3 +254,20 @@ func securityHeaders(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+func (b *telegramBot) setWebhook(
+	ctx context.Context,
+	webhookURL string,
+	secret string,
+) error {
+	payload := map[string]any{
+		"url":             webhookURL,
+		"allowed_updates": []string{"message"},
+	}
+
+	if secret != "" {
+		payload["secret_token"] = secret
+	}
+
+	return b.apiRequest(ctx, "setWebhook", payload)
+}
