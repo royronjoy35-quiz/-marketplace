@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: taskverse
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    envVars:
+      - key: APP_NAME
+        value: TaskVerse
+      - key: APP_ENV
+        value: production
+      - key: MONGODB_DATABASE
+        value: taskverse
+      - key: MIN_PAYOUT_USDT
+        value: "5"
+      - key: MAX_PAYOUT_USDT
+        value: "10"
+      - key: DAILY_PAYOUT_LIMIT_USDT
+        value: "25"
+      - key: BSC_CHAIN_ID
+        value: "97"
+      - key: PAYOUTS_ENABLED
+        value: "false"
+      - key: MAINNET_PAYOUTS_ENABLED
+        value: "false"
+      - key: ADMIN_IDS
+        value: "7695907394"
+      - key: BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: REDIS_URL
+        sync: false
