@@ -18,11 +18,6 @@ type telegramBot struct {
 	client *http.Client
 }
 
-type telegramAPIResponse struct {
-	OK          bool   `json:"ok"`
-	Description string `json:"description"`
-}
-
 type telegramUpdate struct {
 	UpdateID int64            `json:"update_id"`
 	Message  *telegramMessage `json:"message"`
@@ -44,6 +39,21 @@ type telegramEntity struct {
 	URL  string `json:"url"`
 }
 
+type telegramAPIResponse struct {
+	OK          bool   `json:"ok"`
+	Description string `json:"description"`
+}
+
+type replyKeyboard struct {
+	Keyboard        [][]keyboardButton `json:"keyboard"`
+	ResizeKeyboard  bool               `json:"resize_keyboard"`
+	IsPersistent     bool               `json:"is_persistent"`
+}
+
+type keyboardButton struct {
+	Text string `json:"text"`
+}
+
 func newTelegramBot(token string) *telegramBot {
 	return &telegramBot{
 		token: token,
@@ -63,7 +73,7 @@ func (b *telegramBot) apiRequest(
 		return err
 	}
 
-	apiURL := fmt.Sprintf(
+	url := fmt.Sprintf(
 		"https://api.telegram.org/bot%s/%s",
 		b.token,
 		method,
@@ -72,7 +82,7 @@ func (b *telegramBot) apiRequest(
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		apiURL,
+		url,
 		bytes.NewReader(body),
 	)
 	if err != nil {
@@ -83,24 +93,23 @@ func (b *telegramBot) apiRequest(
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("telegram request failed: %w", err)
+		return fmt.Errorf("Telegram request failed: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("telegram HTTP error: %s", resp.Status)
-	}
 
 	var result telegramAPIResponse
 
 	if err := json.NewDecoder(
 		io.LimitReader(resp.Body, 1<<20),
 	).Decode(&result); err != nil {
-		return fmt.Errorf("invalid Telegram response: %w", err)
+		return fmt.Errorf("Telegram response error: %w", err)
 	}
 
 	if !result.OK {
-		return fmt.Errorf("telegram API error: %s", result.Description)
+		return fmt.Errorf(
+			"Telegram API error: %s",
+			result.Description,
+		)
 	}
 
 	return nil
@@ -111,36 +120,50 @@ func (b *telegramBot) send(
 	chatID int64,
 	message string,
 ) error {
-	payload := map[string]any{
+	return b.apiRequest(ctx, "sendMessage", map[string]any{
 		"chat_id": chatID,
 		"text":    message,
-	}
-
-	return b.apiRequest(ctx, "sendMessage", payload)
+	})
 }
 
-func (b *telegramBot) setWebhook(
+func (b *telegramBot) sendMainMenu(
 	ctx context.Context,
-	webhookURL string,
-	secret string,
+	chatID int64,
+	message string,
 ) error {
-	payload := map[string]any{
-		"url":            webhookURL,
-		"allowed_updates": []string{"message"},
+	keyboard := replyKeyboard{
+		Keyboard: [][]keyboardButton{
+			{
+				{Text: "👤 My Account"},
+				{Text: "📋 Available Tasks"},
+			},
+			{
+				{Text: "💰 My Wallet"},
+				{Text: "📜 Transaction History"},
+			},
+			{
+				{Text: "🎧 Support"},
+			},
+		},
+		ResizeKeyboard: true,
+		IsPersistent:  true,
 	}
 
-	if secret != "" {
-		payload["secret_token"] = secret
-	}
-
-	return b.apiRequest(ctx, "setWebhook", payload)
+	return b.apiRequest(ctx, "sendMessage", map[string]any{
+		"chat_id":      chatID,
+		"text":         message,
+		"reply_markup": keyboard,
+	})
 }
 
 var linkPattern = regexp.MustCompile(
 	`(?i)(https?://|www\.|t\.me/|telegram\.me/|tg://|mailto:|[a-z0-9][a-z0-9.-]*\.(com|net|org|io|app|dev|info|me|co|xyz|bd|uk|ru|site|online)(/|[?:# ]|$))`,
 )
 
-func containsLink(text string, entities ...telegramEntity) bool {
+func containsLink(
+	text string,
+	entities ...telegramEntity,
+) bool {
 	if linkPattern.MatchString(strings.TrimSpace(text)) {
 		return true
 	}
