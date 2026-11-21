@@ -1,0 +1,52 @@
+package main
+
+import (
+	"context"
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
+)
+
+type Database struct {
+	Client *mongo.Client
+	DB     *mongo.Database
+}
+
+func ConnectDatabase(ctx context.Context, uri, databaseName string) (*Database, error) {
+	client, err := mongo.Connect(ctx, options.Client().
+		ApplyURI(uri).
+		SetServerSelectionTimeout(10*time.Second).
+		SetConnectTimeout(10*time.Second))
+	if err != nil {
+		return nil, err
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := client.Ping(pingCtx, readpref.Primary()); err != nil {
+		_ = client.Disconnect(context.Background())
+		return nil, err
+	}
+	return &Database{Client: client, DB: client.Database(databaseName)}, nil
+}
+
+// EnsureIndexes creates the uniqueness constraints required by task applications
+// and earnings records. Safe to run on every deployment.
+func EnsureIndexes(ctx context.Context, db *Database) error {
+	_, err := db.DB.Collection("task_applications").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "task_id", Value: 1}, {Key: "worker_id", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("uniq_task_worker_application"),
+	})
+	if err != nil {
+		return err
+	}
+	_, err = db.DB.Collection("earnings_ledger").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "submission_id", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("uniq_earning_submission"),
+	})
+	return err
+}
