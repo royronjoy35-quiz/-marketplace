@@ -8,28 +8,32 @@ import (
 )
 
 type Config struct {
-	BotToken      string
-	BotUsername   string
-	WebhookSecret string
-	PublicBaseURL string
-	WebhookPath   string
-	MongoURI      string
-	DatabaseName  string
-	Port          string
-	AdminIDs      map[int64]bool
+	BotToken                  string
+	BotUsername               string
+	WebhookSecret             string
+	PublicBaseURL             string
+	WebhookPath               string
+	MongoURI                  string
+	DatabaseName              string
+	Port                      string
+	AdminIDs                  map[int64]bool
+	VerificationReceiptSecret string
+	TreasuryInitialUSDT       string
 }
 
 func LoadConfig() (Config, error) {
 	cfg := Config{
-		BotToken:      strings.TrimSpace(os.Getenv("BOT_TOKEN")),
-		BotUsername:   strings.TrimPrefix(strings.TrimSpace(os.Getenv("BOT_USERNAME")), "@"),
-		WebhookSecret: strings.TrimSpace(os.Getenv("TELEGRAM_WEBHOOK_SECRET")),
-		PublicBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"),
-		WebhookPath:   envOr("WEBHOOK_PATH", "/webhook/telegram"),
-		MongoURI:      strings.TrimSpace(os.Getenv("MONGODB_URI")),
-		DatabaseName:  envOr("DATABASE_NAME", "dr_marketplace"),
-		Port:          envOr("PORT", "8080"),
-		AdminIDs:      make(map[int64]bool),
+		BotToken:                  strings.TrimSpace(os.Getenv("BOT_TOKEN")),
+		BotUsername:               strings.TrimPrefix(strings.TrimSpace(os.Getenv("BOT_USERNAME")), "@"),
+		WebhookSecret:             strings.TrimSpace(os.Getenv("TELEGRAM_WEBHOOK_SECRET")),
+		PublicBaseURL:             strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"),
+		WebhookPath:               envOr("WEBHOOK_PATH", "/webhook/telegram"),
+		MongoURI:                  strings.TrimSpace(os.Getenv("MONGODB_URI")),
+		DatabaseName:              envOr("DATABASE_NAME", "dr_marketplace"),
+		Port:                      envOr("PORT", "8080"),
+		AdminIDs:                  make(map[int64]bool),
+		VerificationReceiptSecret: strings.TrimSpace(os.Getenv("VERIFICATION_RECEIPT_SECRET")),
+		TreasuryInitialUSDT:       envOr("TREASURY_INITIAL_USDT", "0"),
 	}
 	if cfg.BotToken == "" {
 		return Config{}, fmt.Errorf("BOT_TOKEN is required")
@@ -42,6 +46,12 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.MongoURI == "" {
 		return Config{}, fmt.Errorf("MONGODB_URI is required")
+	}
+	if cfg.VerificationReceiptSecret != "" && len(cfg.VerificationReceiptSecret) < 32 {
+		return Config{}, fmt.Errorf("VERIFICATION_RECEIPT_SECRET must be at least 32 characters when set")
+	}
+	if !ValidateUSDTAmountOrZero(cfg.TreasuryInitialUSDT) {
+		return Config{}, fmt.Errorf("TREASURY_INITIAL_USDT must be a non-negative USDT amount with up to 6 decimals")
 	}
 	if !strings.HasPrefix(cfg.WebhookPath, "/") {
 		return Config{}, fmt.Errorf("WEBHOOK_PATH must start with /")
@@ -72,4 +82,12 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func ValidateUSDTAmountOrZero(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "0" || value == "0.0" || value == "0.00" || value == "0.000000" {
+		return true
+	}
+	return ValidateUSDTAmount(value)
 }
