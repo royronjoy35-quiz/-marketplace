@@ -24,6 +24,9 @@ const (
 	menuWithdraw           = "🏦 Withdraw"
 	menuSupport            = "🎧 Support"
 	menuCreateTask         = "➕ Create Task"
+	menuWalletBalance      = "💳 Wallet Balance"
+	menuAddBalance         = "➕ Add Balance"
+	menuTreasury           = "🏦 Owner Treasury"
 	menuMyTasks            = "📋 My Tasks"
 	menuWorkerTasks        = "🧰 Available Tasks"
 	menuAdmin              = "🛡 Admin Panel"
@@ -108,17 +111,17 @@ type App struct {
 	Marketplace *MarketplaceStore
 	Payments    *PaymentStore
 	TaskFlow    *TaskFlowStore
+	Wallet      *WalletStore
+	Wizards     *TaskWizardStore
 }
 
 func NewApp(cfg Config, db *Database, bot *TelegramClient) *App {
+	flow := NewTaskFlowStore(db)
+	flow.providers = NewVerificationProviderEngine(bot, cfg.VerificationReceiptSecret, flow.receipts)
 	return &App{
-		Config:      cfg,
-		DB:          db,
-		Bot:         bot,
-		Users:       NewUserStore(db),
-		Marketplace: NewMarketplaceStore(db),
-		Payments:    NewPaymentStore(db),
-		TaskFlow:    NewTaskFlowStore(db),
+		Config: cfg, DB: db, Bot: bot, Users: NewUserStore(db),
+		Marketplace: NewMarketplaceStore(db), Payments: NewPaymentStore(db), TaskFlow: flow,
+		Wallet: NewWalletStore(db), Wizards: NewTaskWizardStore(db),
 	}
 }
 
@@ -165,6 +168,7 @@ func SellerKeyboard(_ bool) *ReplyKeyboardMarkup {
 	return &ReplyKeyboardMarkup{
 		Keyboard: [][]ReplyKeyboardButton{
 			{{Text: menuCreateTask}, {Text: menuMyTasks}},
+			{{Text: menuWalletBalance}, {Text: menuAddBalance}},
 			{{Text: menuSellerApplications}, {Text: menuSellerSubmissions}},
 			{{Text: menuMarketplace}, {Text: menuProfile}},
 			{{Text: menuMain}},
@@ -182,6 +186,7 @@ func AdminKeyboard() *ReplyKeyboardMarkup {
 			{{Text: menuAdminWithdrawals}, {Text: menuAdminHistory}},
 			{{Text: menuSellerSubmissions}, {Text: menuAdminMarketplace}},
 			{{Text: menuAdminSettings}},
+			{{Text: menuTreasury}},
 			{{Text: menuCreateTask}, {Text: menuMyTasks}},
 			{{Text: menuMain}},
 		},
@@ -243,7 +248,11 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 	}
 
 	if msg.SuccessfulPayment != nil {
-		a.handleSuccessfulSellerPayment(ctx, msg.Chat.ID, msg.From.ID, msg.SuccessfulPayment)
+		if strings.HasPrefix(msg.SuccessfulPayment.InvoicePayload, "wallet:") {
+			a.handleSuccessfulWalletPayment(ctx, msg.Chat.ID, msg.From.ID, msg.SuccessfulPayment)
+		} else {
+			a.handleSuccessfulSellerPayment(ctx, msg.Chat.ID, msg.From.ID, msg.SuccessfulPayment)
+		}
 		return
 	}
 
@@ -276,10 +285,19 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 				return
 			}
 			_ = a.TaskFlow.ClearSubmissionSession(ctx, msg.From.ID)
+			submission, _ := a.TaskFlow.GetLatestSubmission(ctx, appID)
 			if app != nil {
-				a.sendPlain(ctx, app.SellerID, fmt.Sprintf("🔎 New proof from Worker %d was screened by the strict verification engine. Open Submissions to see the pre-check result and any risk flags.", msg.From.ID))
+				if submission != nil && submission.Status == SubmissionApproved {
+					a.sendPlain(ctx, app.SellerID, fmt.Sprintf("✅ Trusted provider auto-verified Worker %d's task submission. Reward was recorded as pending funding.", msg.From.ID))
+				} else {
+					a.sendPlain(ctx, app.SellerID, fmt.Sprintf("🔎 New proof from Worker %d was screened. Open Submissions to review its pre-check and risk flags.", msg.From.ID))
+				}
 			}
-			a.sendWithKeyboard(ctx, msg.Chat.ID, "🔎 Your proof was screened and saved. Duplicate or risky evidence is held automatically; actual task completion still requires Seller approval until a trusted provider API is connected.", a.mainMenuKeyboard(ctx, msg.From.ID))
+			userMessage := "🔎 Your proof was screened and saved. Any suspicious or unsupported evidence is held for Seller/Admin review."
+			if submission != nil && submission.Status == SubmissionApproved {
+				userMessage = "✅ Your task was verified automatically by the trusted provider. Your reward has been recorded as pending funding; it is not withdrawable yet."
+			}
+			a.sendWithKeyboard(ctx, msg.Chat.ID, userMessage, a.mainMenuKeyboard(ctx, msg.From.ID))
 			return
 		}
 	}
@@ -296,22 +314,40 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 				return
 			}
 			_ = a.TaskFlow.ClearSubmissionSession(ctx, msg.From.ID)
+			submission, _ := a.TaskFlow.GetLatestSubmission(ctx, appID)
 			if app != nil {
-				a.sendPlain(ctx, app.SellerID, fmt.Sprintf("🔎 New proof from Worker %d was screened by the strict verification engine. Open Submissions to see the pre-check result and any risk flags.", msg.From.ID))
+				if submission != nil && submission.Status == SubmissionApproved {
+					a.sendPlain(ctx, app.SellerID, fmt.Sprintf("✅ Trusted provider auto-verified Worker %d's task submission. Reward was recorded as pending funding.", msg.From.ID))
+				} else {
+					a.sendPlain(ctx, app.SellerID, fmt.Sprintf("🔎 New proof from Worker %d was screened. Open Submissions to review its pre-check and risk flags.", msg.From.ID))
+				}
 			}
-			a.sendWithKeyboard(ctx, msg.Chat.ID, "🔎 Your proof was screened and saved. Duplicate or risky evidence is held automatically; actual task completion still requires Seller approval until a trusted provider API is connected.", a.mainMenuKeyboard(ctx, msg.From.ID))
+			userMessage := "🔎 Your proof was screened and saved. Suspicious, unsupported, or unverified evidence is held for Seller/Admin review."
+			if submission != nil && submission.Status == SubmissionApproved {
+				userMessage = "✅ Your task was verified automatically by the trusted provider. Your reward has been recorded as pending funding; it is not withdrawable yet."
+			}
+			a.sendWithKeyboard(ctx, msg.Chat.ID, userMessage, a.mainMenuKeyboard(ctx, msg.From.ID))
 			return
 		}
 	}
 
-	// A pending task draft takes priority over normal menu navigation.
-	draft, draftErr := a.Marketplace.GetDraft(ctx, msg.From.ID)
-	if draftErr == nil && !strings.HasPrefix(text, "/") && text != menuCancel {
-		a.handleTaskDraft(ctx, msg, draft)
+	// Interactive task wizard takes priority over normal menu navigation.
+	if wizard, wizardErr := a.Wizards.Get(ctx, msg.From.ID); wizardErr == nil && !strings.HasPrefix(text, "/") && text != menuCancel {
+		a.handleTaskWizardMessage(ctx, msg, wizard)
+		return
+	} else if wizardErr != nil && wizardErr != mongo.ErrNoDocuments {
+		slog.Error("task wizard lookup failed", "error", wizardErr, "telegram_id", msg.From.ID)
 		return
 	}
-	if draftErr != nil && draftErr != mongo.ErrNoDocuments {
-		slog.Error("task draft lookup failed", "error", draftErr, "telegram_id", msg.From.ID)
+
+	// Legacy pre-wallet drafts are deliberately disabled so they cannot bypass
+	// Seller Wallet funding. Remove any stale draft left by an older bot version.
+	if _, legacyErr := a.Marketplace.GetDraft(ctx, msg.From.ID); legacyErr == nil {
+		_ = a.Marketplace.DeleteDraft(ctx, msg.From.ID)
+		a.sendPlain(ctx, msg.Chat.ID, "Your older Task draft was cleared because Task Creation now requires the funded Wallet wizard. Press Create Task to start again.")
+		return
+	} else if legacyErr != mongo.ErrNoDocuments {
+		slog.Error("legacy task draft lookup failed", "error", legacyErr, "telegram_id", msg.From.ID)
 		return
 	}
 
@@ -322,7 +358,7 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, fmt.Sprintf("Welcome, %s! 🚀\n\nWelcome to ⒹⓇ Marketplace.\nYour account is registered.\n\nChoose an option from the menu below.", safeName(msg.From.FirstName)))
 		return
 	case "/help":
-		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, fmt.Sprintf("ⒹⓇ Marketplace Help\n\nUse the menu buttons to navigate.\nSend /seller to request Seller registration (%d Telegram Star(s)). Use /cancel to cancel an active task creation.\nAdmin/Seller task verification: /set_task_verification TASK_ID MODE VALUE", SellerRegistrationStars))
+		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, fmt.Sprintf("ⒹⓇ Marketplace Help\n\nUse the menu buttons to navigate.\nSend /seller to request Seller registration (%d Telegram Star(s)). Use /cancel to cancel an active task creation.\nAdmin/Seller task verification: /set_task_verification TASK_ID MODE VALUE\nTrusted provider: /set_task_provider TASK_ID PROVIDER REF", SellerRegistrationStars))
 		return
 	case "/status":
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "ⒹⓇ Marketplace is online.")
@@ -338,6 +374,7 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 		return
 	case "/cancel":
 		_ = a.Marketplace.DeleteDraft(ctx, msg.From.ID)
+		_ = a.Wizards.Delete(ctx, msg.From.ID)
 		_ = a.TaskFlow.ClearSubmissionSession(ctx, msg.From.ID)
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "Current action cancelled.")
 		return
@@ -383,11 +420,18 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 	case "/set_task_verification":
 		a.handleSetTaskVerification(ctx, msg, fields)
 		return
+	case "/set_task_provider":
+		a.handleSetTaskProvider(ctx, msg, fields)
+		return
+	case "/treasury_credit":
+		a.handleTreasuryCredit(ctx, msg, fields)
+		return
 	}
 
 	switch text {
 	case menuCancel:
 		_ = a.Marketplace.DeleteDraft(ctx, msg.From.ID)
+		_ = a.Wizards.Delete(ctx, msg.From.ID)
 		_ = a.TaskFlow.ClearSubmissionSession(ctx, msg.From.ID)
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "Current action cancelled.")
 	case menuMain:
@@ -416,6 +460,22 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "🎧 Support\n\nSupport tickets will be added in a later phase.")
 	case menuCreateTask, "Create Task":
 		a.beginTaskCreation(ctx, msg.Chat.ID, msg.From.ID)
+	case menuWalletBalance, "Wallet Balance":
+		if a.IsAdmin(msg.From.ID) {
+			a.sendTreasuryBalance(ctx, msg.Chat.ID, msg.From.ID)
+		} else {
+			a.showWalletBalance(ctx, msg.Chat.ID, msg.From.ID)
+		}
+	case menuAddBalance, "Add Balance":
+		if a.IsAdmin(msg.From.ID) {
+			a.sendPlain(ctx, msg.Chat.ID, "Admin tasks are funded from Owner Treasury, not a personal Seller Wallet.")
+		} else if a.isVerifiedSeller(ctx, msg.From.ID) {
+			a.sendPlainWithInline(ctx, msg.Chat.ID, "Choose a Telegram Stars Wallet top-up:", walletTopupKeyboard())
+		} else {
+			a.sendPlain(ctx, msg.Chat.ID, "Seller Wallet is available only after verified Seller registration. Send /seller first.")
+		}
+	case menuTreasury, "Owner Treasury":
+		a.sendTreasuryBalance(ctx, msg.Chat.ID, msg.From.ID)
 	case menuMyTasks, "My Tasks":
 		a.sendMyTasks(ctx, msg.Chat.ID, msg.From.ID)
 	case menuAdmin, "Admin Panel", menuAdminDashboard, "Dashboard":
@@ -447,109 +507,12 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 }
 
 func (a *App) handleTaskDraft(ctx context.Context, msg *TelegramMessage, draft *TaskDraft) {
-	input := strings.TrimSpace(msg.Text)
-	if input == "" {
-		a.sendPlain(ctx, msg.Chat.ID, "Please send text, or /cancel to stop.")
-		return
-	}
-
-	switch draft.Step {
-	case "title":
-		if len([]rune(input)) < 4 || len([]rune(input)) > 80 {
-			a.sendPlain(ctx, msg.Chat.ID, "Task title must be 4–80 characters. Please try again.")
-			return
-		}
-		draft.Title = input
-		draft.Step = "description"
-		_ = a.Marketplace.SaveDraft(ctx, draft)
-		a.sendPlain(ctx, msg.Chat.ID, "Step 2/4: Send the task description (20–1000 characters).")
-	case "description":
-		if len([]rune(input)) < 20 || len([]rune(input)) > 1000 {
-			a.sendPlain(ctx, msg.Chat.ID, "Description must be 20–1000 characters. Please try again.")
-			return
-		}
-		draft.Description = input
-		draft.Step = "reward"
-		_ = a.Marketplace.SaveDraft(ctx, draft)
-		a.sendPlain(ctx, msg.Chat.ID, "Step 3/4: Enter the reward per completed task in USDT (example: 0.50). Maximum 6 decimal places.")
-	case "reward":
-		if !ValidateUSDTAmount(input) {
-			a.sendPlain(ctx, msg.Chat.ID, "Invalid reward. Enter a positive USDT amount, for example 0.50 (up to 6 decimal places).")
-			return
-		}
-		draft.RewardUSDT = input
-		draft.Step = "slots"
-		_ = a.Marketplace.SaveDraft(ctx, draft)
-		a.sendPlain(ctx, msg.Chat.ID, "Step 4/4: How many workers can complete this task? Enter a whole number from 1 to 500.")
-	case "slots":
-		slots, err := strconv.Atoi(input)
-		if err != nil || slots < 1 || slots > 500 {
-			a.sendPlain(ctx, msg.Chat.ID, "Enter a whole number between 1 and 500.")
-			return
-		}
-		draft.Slots = slots
-		user, err := a.Users.GetByTelegramID(ctx, msg.From.ID)
-		if err != nil {
-			a.sendPlain(ctx, msg.Chat.ID, "Could not verify your account. Please try again.")
-			return
-		}
-		if !a.IsAdmin(msg.From.ID) {
-			paid, paymentErr := a.Payments.HasPaidSellerRegistration(ctx, msg.From.ID)
-			if paymentErr != nil || !paid || user.Role != "seller" {
-				if paymentErr == nil && !paid {
-					_ = a.Users.SetRole(ctx, msg.From.ID, "user")
-				}
-				_ = a.Marketplace.DeleteDraft(ctx, msg.From.ID)
-				a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, fmt.Sprintf("A verified %d-Star Seller registration is required. Send /seller to receive the payment invoice.", SellerRegistrationStars))
-				return
-			}
-		}
-		creatorRole := user.Role
-		status := TaskStatusPendingReview
-		if a.IsAdmin(msg.From.ID) {
-			creatorRole = "admin"
-			status = TaskStatusActive
-		}
-		task := &Task{CreatorID: msg.From.ID, CreatorRole: creatorRole, Title: draft.Title, Description: draft.Description, RewardUSDT: draft.RewardUSDT, BudgetUSDT: CalculateTaskBudget(draft.RewardUSDT, draft.Slots), Slots: draft.Slots, Status: status, FundingStatus: "unfunded", VerificationMode: VerificationManual}
-		if err := a.Marketplace.CreateTask(ctx, task); err != nil {
-			slog.Error("task creation failed", "error", err, "telegram_id", msg.From.ID)
-			a.sendPlain(ctx, msg.Chat.ID, "Task could not be saved. Please try again later.")
-			return
-		}
-		_ = a.Marketplace.DeleteDraft(ctx, msg.From.ID)
-		if status == TaskStatusActive {
-			a.sendWithKeyboard(ctx, msg.Chat.ID, fmt.Sprintf("✅ Task created and published.\n\nTitle: %s\nReward: %s USDT\nSlots: %d\nTask ID: %s\n\nNote: Worker applications and payment escrow are not active yet.", task.Title, task.RewardUSDT, task.Slots, task.ID.Hex()), a.mainMenuKeyboard(ctx, msg.From.ID))
-		} else {
-			a.sendWithKeyboard(ctx, msg.Chat.ID, fmt.Sprintf("✅ Task submitted for Admin review.\n\nTitle: %s\nReward: %s USDT\nSlots: %d\nTask ID: %s\n\nIt will appear in Marketplace only after approval.", task.Title, task.RewardUSDT, task.Slots, task.ID.Hex()), SellerKeyboard(false))
-		}
-	default:
-		_ = a.Marketplace.DeleteDraft(ctx, msg.From.ID)
-		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "The saved task draft was invalid and has been cancelled. Please start again.")
-	}
+	_ = a.Marketplace.DeleteDraft(ctx, msg.From.ID)
+	a.sendPlain(ctx, msg.Chat.ID, "Legacy Task drafts cannot be published. Please use Create Task so the Seller Wallet or Owner Treasury is reserved before publication.")
 }
 
 func (a *App) beginTaskCreation(ctx context.Context, chatID, userID int64) {
-	user, err := a.Users.GetByTelegramID(ctx, userID)
-	if err != nil {
-		a.sendPlain(ctx, chatID, "Unable to verify your account.")
-		return
-	}
-	if !a.IsAdmin(userID) {
-		paid, paymentErr := a.Payments.HasPaidSellerRegistration(ctx, userID)
-		if paymentErr != nil || !paid || user.Role != "seller" {
-			if paymentErr == nil && user.Role == "seller" && !paid {
-				_ = a.Users.SetRole(ctx, userID, "user")
-			}
-			a.sendMainMenu(ctx, chatID, userID, fmt.Sprintf("Seller access requires a verified one-time payment of %d Telegram Star(s). Send /seller to receive the official payment invoice.", SellerRegistrationStars))
-			return
-		}
-	}
-	if err := a.Marketplace.StartDraft(ctx, userID); err != nil {
-		slog.Error("could not start task draft", "error", err)
-		a.sendPlain(ctx, chatID, "Could not start task creation. Please try again.")
-		return
-	}
-	a.sendWithKeyboard(ctx, chatID, "➕ CREATE TASK\n\nStep 1/4: Send a short task title (4–80 characters).\n\nSend /cancel to stop.", CancelKeyboard())
+	a.startTaskWizard(ctx, chatID, userID)
 }
 
 func (a *App) becomeSeller(ctx context.Context, chatID, userID int64) {
@@ -602,11 +565,19 @@ func (a *App) handlePreCheckout(ctx context.Context, query *PreCheckoutQuery) {
 	if query == nil {
 		return
 	}
+	if strings.HasPrefix(query.InvoicePayload, "wallet:") {
+		p, err := a.Wallet.GetTopup(ctx, query.InvoicePayload, query.From.ID)
+		valid := err == nil && p.Status == "pending" && time.Now().UTC().Before(p.ExpiresAt) && p.Currency == "XTR" && p.Stars == query.TotalAmount && query.Currency == "XTR"
+		if !valid {
+			_ = a.Bot.AnswerPreCheckoutQuery(ctx, query.ID, false, "This Wallet invoice is invalid or expired. Please request a new invoice.")
+			return
+		}
+		_ = a.Bot.AnswerPreCheckoutQuery(ctx, query.ID, true, "")
+		return
+	}
 	payment, err := a.Payments.GetSellerPayment(ctx, query.InvoicePayload, query.From.ID)
 	if err != nil || payment.Status != sellerPaymentPending || time.Now().UTC().After(payment.ExpiresAt) || query.Currency != "XTR" || query.TotalAmount != SellerRegistrationStars || payment.Currency != "XTR" || payment.Amount != SellerRegistrationStars {
-		if err := a.Bot.AnswerPreCheckoutQuery(ctx, query.ID, false, "This Seller invoice is invalid or expired. Please request a new invoice from Seller Center."); err != nil {
-			slog.Error("pre-checkout rejection failed", "error", err, "telegram_id", query.From.ID)
-		}
+		_ = a.Bot.AnswerPreCheckoutQuery(ctx, query.ID, false, "This Seller invoice is invalid or expired. Please request a new invoice from /seller.")
 		return
 	}
 	if err := a.Bot.AnswerPreCheckoutQuery(ctx, query.ID, true, ""); err != nil {
@@ -631,6 +602,35 @@ func (a *App) handleSuccessfulSellerPayment(ctx context.Context, chatID, userID 
 		return
 	}
 	a.sendWithKeyboard(ctx, chatID, fmt.Sprintf("🎉 Payment confirmed: %d Telegram Star(s). Your Seller account is now active. Your separate Seller menu is now enabled.", SellerRegistrationStars), SellerKeyboard(false))
+}
+
+func (a *App) sendTreasuryBalance(ctx context.Context, chatID, userID int64) {
+	if !a.IsAdmin(userID) {
+		a.sendPlain(ctx, chatID, "Admin access required.")
+		return
+	}
+	balance, revenue, pending, err := a.Wallet.TreasurySummary(ctx)
+	if err != nil {
+		a.sendPlain(ctx, chatID, "Owner Treasury could not be loaded.")
+		return
+	}
+	a.sendWithKeyboard(ctx, chatID, fmt.Sprintf("🏦 OWNER TREASURY\n\nAvailable for Admin Tasks: %s USDT\nOwner Revenue (approved): %s USDT\nPending Seller Task Revenue: %s USDT\n\nAdmin-created tasks are funded from the available Treasury balance. Use /treasury_credit only after funds are actually received.", microToUSDT(balance), microToUSDT(revenue), microToUSDT(pending)), AdminKeyboard())
+}
+
+func (a *App) handleTreasuryCredit(ctx context.Context, msg *TelegramMessage, fields []string) {
+	if !a.requireAdmin(msg.Chat.ID, msg.From.ID) {
+		return
+	}
+	if len(fields) < 3 {
+		a.sendPlain(ctx, msg.Chat.ID, "Usage: /treasury_credit AMOUNT_USDT FUNDING_REFERENCE\nOnly record funds that have already been deposited to the Owner Treasury.")
+		return
+	}
+	note := strings.Join(fields[2:], " ")
+	if err := a.Wallet.CreditTreasury(ctx, msg.From.ID, fields[1], note); err != nil {
+		a.sendPlain(ctx, msg.Chat.ID, "Treasury credit failed: "+err.Error())
+		return
+	}
+	a.sendTreasuryBalance(ctx, msg.Chat.ID, msg.From.ID)
 }
 
 func (a *App) sendSellerCenter(ctx context.Context, chatID, userID int64) {
@@ -745,15 +745,30 @@ func (a *App) handleTaskModeration(ctx context.Context, msg *TelegramMessage, fi
 		a.sendPlain(ctx, msg.Chat.ID, "Invalid Task ID.")
 		return
 	}
-	if err := a.Marketplace.UpdateTaskStatus(ctx, id, status); err != nil {
+	moderatedTask, _ := a.TaskFlow.GetTask(ctx, id)
+	if status == TaskStatusActive {
+		err = a.Wallet.ApproveFundedTask(ctx, id)
+	} else if status == TaskStatusRejected {
+		err = a.Wallet.RefundRejectedTask(ctx, id)
+	} else {
+		err = a.Marketplace.UpdateTaskStatus(ctx, id, status)
+	}
+	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			a.sendPlain(ctx, msg.Chat.ID, "Task not found or it is no longer pending review.")
 			return
 		}
-		a.sendPlain(ctx, msg.Chat.ID, "Could not update task status.")
+		a.sendPlain(ctx, msg.Chat.ID, "Could not update task status: "+err.Error())
 		return
 	}
-	a.sendWithKeyboard(ctx, msg.Chat.ID, "Task status updated: "+status, AdminKeyboard())
+	a.sendWithKeyboard(ctx, msg.Chat.ID, "Task status updated: "+status+". Funding was released/refunded according to the task policy.", AdminKeyboard())
+	if moderatedTask != nil && moderatedTask.CreatorID != msg.From.ID {
+		if status == TaskStatusActive {
+			a.sendPlain(ctx, moderatedTask.CreatorID, "✅ Your Task was approved and is now visible in Marketplace.")
+		} else if status == TaskStatusRejected {
+			a.sendPlain(ctx, moderatedTask.CreatorID, "❌ Your Task was rejected. The full original investment has been returned to your Seller Wallet.")
+		}
+	}
 }
 
 func (a *App) handleAccountStatusCommand(ctx context.Context, msg *TelegramMessage, fields []string, status string) {
