@@ -173,7 +173,15 @@ func (c *TelegramClient) SendMessageWithKeyboard(
 	}
 
 	if keyboard != nil {
-		payload["reply_markup"] = keyboard
+		// Keep the reply keyboard available without forcing it to stay open.
+		// When the user hides it, Telegram clients can show their native
+		// keyboard-toggle icon in the message input bar.
+		// The icon itself is rendered and positioned by the Telegram client.
+		markup := *keyboard
+		markup.ResizeKeyboard = true
+		markup.IsPersistent = false
+		markup.OneTimeKeyboard = false
+		payload["reply_markup"] = &markup
 	}
 
 	return c.call(
