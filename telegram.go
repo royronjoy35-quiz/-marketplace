@@ -173,15 +173,7 @@ func (c *TelegramClient) SendMessageWithKeyboard(
 	}
 
 	if keyboard != nil {
-		// Keep the reply keyboard available without forcing it to stay open.
-		// When the user hides it, Telegram clients can show their native
-		// keyboard-toggle icon in the message input bar.
-		// The icon itself is rendered and positioned by the Telegram client.
-		markup := *keyboard
-		markup.ResizeKeyboard = true
-		markup.IsPersistent = false
-		markup.OneTimeKeyboard = false
-		payload["reply_markup"] = &markup
+		payload["reply_markup"] = keyboard
 	}
 
 	return c.call(
@@ -240,13 +232,6 @@ func (c *TelegramClient) SendInvoice(
 
 	if stars <= 0 {
 		return fmt.Errorf("invoice amount must be positive")
-	}
-
-	if stars != SellerRegistrationStars {
-		return fmt.Errorf(
-			"invalid Seller registration amount: expected %d Stars",
-			SellerRegistrationStars,
-		)
 	}
 
 	if strings.TrimSpace(payload) == "" {
@@ -372,4 +357,75 @@ func (c *TelegramClient) GetWebhookInfo(
 	}
 
 	return result.Result, nil
+}
+
+// GetChatMember verifies a user's membership using Telegram's official Bot API.
+// The bot must be an administrator in the target channel for reliable results.
+func (c *TelegramClient) GetChatMember(ctx context.Context, chatID string, userID int64) (string, bool, error) {
+	if c.token == "" {
+		return "", false, fmt.Errorf("Telegram Bot Token is empty")
+	}
+	payload, err := json.Marshal(map[string]any{"chat_id": chatID, "user_id": userID})
+	if err != nil {
+		return "", false, err
+	}
+	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/getChatMember", c.token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return "", false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+	var result struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+		Result      struct {
+			Status   string `json:"status"`
+			IsMember bool   `json:"is_member"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", false, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !result.OK {
+		return "", false, fmt.Errorf("Telegram getChatMember failed: %s", result.Description)
+	}
+	return result.Result.Status, result.Result.IsMember, nil
+}
+
+// GetMeID returns the bot's Telegram user ID for channel administrator checks.
+func (c *TelegramClient) GetMeID(ctx context.Context) (int64, error) {
+	var result struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+		Result      struct {
+			ID int64 `json:"id"`
+		} `json:"result"`
+	}
+	data, err := json.Marshal(map[string]any{})
+	if err != nil {
+		return 0, err
+	}
+	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/getMe", c.token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !result.OK || result.Result.ID <= 0 {
+		return 0, fmt.Errorf("Telegram getMe failed: %s", result.Description)
+	}
+	return result.Result.ID, nil
 }
