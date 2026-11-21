@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -42,4 +43,23 @@ func (s *UserStore) SetRole(ctx context.Context, id int64, role string) error {
 		bson.M{"$set": bson.M{"role": role, "updated_at": time.Now().UTC()}},
 	)
 	return err
+}
+
+// SetStatus is used by Admin account controls. Supported values are active, banned, and suspended.
+func (s *UserStore) SetStatus(ctx context.Context, id int64, status string) error {
+	if status != "active" && status != "banned" && status != "suspended" {
+		return fmt.Errorf("unsupported account status: %s", status)
+	}
+	result, err := s.collection.UpdateOne(
+		ctx,
+		bson.M{"telegram_id": id},
+		bson.M{"$set": bson.M{"status": status, "updated_at": time.Now().UTC()}},
+	)
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount == 0 {
+		return mongo.ErrNoDocuments
+	}
+	return nil
 }
