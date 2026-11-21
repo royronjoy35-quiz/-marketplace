@@ -17,6 +17,8 @@ const (
 	TaskStatusActive        = "active"
 	TaskStatusPendingReview = "pending_review"
 	TaskStatusRejected      = "rejected"
+	TaskStatusPaused        = "paused"
+	TaskStatusDeleted       = "deleted"
 )
 
 type MarketplaceStore struct {
@@ -101,6 +103,34 @@ func (s *MarketplaceStore) UpdateTaskStatus(ctx context.Context, id primitive.Ob
 		bson.M{"_id": id, "status": TaskStatusPendingReview},
 		bson.M{"$set": bson.M{"status": status, "updated_at": time.Now().UTC()}},
 	)
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount == 0 {
+		return mongo.ErrNoDocuments
+	}
+	return nil
+}
+
+// ChangeTaskStatus updates a task only when it belongs to ownerID. A zero ownerID
+// is reserved for an Admin action after the caller has checked the Admin allowlist.
+func (s *MarketplaceStore) ChangeTaskStatus(ctx context.Context, id primitive.ObjectID, ownerID int64, status string) error {
+	var allowedFrom []string
+	switch status {
+	case TaskStatusPaused:
+		allowedFrom = []string{TaskStatusActive}
+	case TaskStatusActive:
+		allowedFrom = []string{TaskStatusPaused}
+	case TaskStatusDeleted:
+		allowedFrom = []string{TaskStatusActive, TaskStatusPaused, TaskStatusRejected, TaskStatusPendingReview}
+	default:
+		return fmt.Errorf("unsupported task status: %s", status)
+	}
+	filter := bson.M{"_id": id, "status": bson.M{"$in": allowedFrom}}
+	if ownerID > 0 {
+		filter["creator_id"] = ownerID
+	}
+	result, err := s.tasks.UpdateOne(ctx, filter, bson.M{"$set": bson.M{"status": status, "updated_at": time.Now().UTC()}})
 	if err != nil {
 		return err
 	}
