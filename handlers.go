@@ -215,6 +215,20 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 		return
 	}
 
+	// Block suspended/banned accounts before processing any menu or command.
+	// Admin access is controlled separately by the server-side ADMIN_IDS allowlist.
+	if !a.IsAdmin(msg.From.ID) {
+		user, userErr := a.Users.GetByTelegramID(ctx, msg.From.ID)
+		if userErr == nil && (user.Status == "banned" || user.Status == "suspended") {
+			statusText := "suspended"
+			if user.Status == "banned" {
+				statusText = "banned"
+			}
+			a.sendPlain(ctx, msg.Chat.ID, "Your account is currently "+statusText+". Please contact support if you believe this is a mistake.")
+			return
+		}
+	}
+
 	text := strings.TrimSpace(msg.Text)
 	if text == "" {
 		return
@@ -261,6 +275,36 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 		return
 	case "/reject_task":
 		a.handleTaskModeration(ctx, msg, fields, TaskStatusRejected)
+		return
+	case "/ban":
+		a.handleAccountStatusCommand(ctx, msg, fields, "banned")
+		return
+	case "/unban", "/restore":
+		a.handleAccountStatusCommand(ctx, msg, fields, "active")
+		return
+	case "/suspend":
+		a.handleAccountStatusCommand(ctx, msg, fields, "suspended")
+		return
+	case "/pause_task":
+		a.handleTaskOwnerCommand(ctx, msg, fields, TaskStatusPaused)
+		return
+	case "/resume_task":
+		a.handleTaskOwnerCommand(ctx, msg, fields, TaskStatusActive)
+		return
+	case "/delete_task":
+		a.handleTaskOwnerCommand(ctx, msg, fields, TaskStatusDeleted)
+		return
+	case "/approve_withdraw":
+		a.handleWithdrawalCommand(ctx, msg, fields, "approved")
+		return
+	case "/reject_withdraw":
+		a.handleWithdrawalCommand(ctx, msg, fields, "rejected")
+		return
+	case "/mark_withdraw_paid":
+		a.handleWithdrawalCommand(ctx, msg, fields, "paid")
+		return
+	case "/set_auto_withdraw_threshold":
+		a.handleThresholdCommand(ctx, msg, fields)
 		return
 	}
 
@@ -521,6 +565,18 @@ func (a *App) sendTaskList(ctx context.Context, chatID, userID int64) {
 }
 
 func (a *App) sendMyTasks(ctx context.Context, chatID, userID int64) {
+	if !a.IsAdmin(userID) {
+		user, err := a.Users.GetByTelegramID(ctx, userID)
+		if err != nil || user.Role != "seller" {
+			a.sendMainMenu(ctx, chatID, userID, "My Tasks is available only to verified Sellers and Admins.")
+			return
+		}
+		paid, err := a.Payments.HasPaidSellerRegistration(ctx, userID)
+		if err != nil || !paid {
+			a.sendMainMenu(ctx, chatID, userID, "Verified Seller access is required. Send /seller to check your registration.")
+			return
+		}
+	}
 	tasks, err := a.Marketplace.ListTasks(ctx, "", userID, 10)
 	if err != nil {
 		slog.Error("my tasks lookup failed", "error", err)
@@ -535,7 +591,12 @@ func (a *App) sendMyTasks(ctx context.Context, chatID, userID int64) {
 		tasks = append(active, pending...)
 	}
 	message := FormatTaskList(tasks, "You have not created any tasks yet.")
-	a.sendWithKeyboard(ctx, chatID, "📋 MY TASKS\n\n"+message, SellerKeyboard(a.IsAdmin(userID)))
+	message += "\n\nTask controls (use the Task ID above):\n/pause_task TASK_ID\n/resume_task TASK_ID\n/delete_task TASK_ID"
+	keyboard := SellerKeyboard(false)
+	if a.IsAdmin(userID) {
+		keyboard = AdminKeyboard()
+	}
+	a.sendWithKeyboard(ctx, chatID, "📋 MY TASKS\n\n"+message, keyboard)
 }
 
 func (a *App) sendPendingTasks(ctx context.Context, chatID, userID int64) {
@@ -579,6 +640,67 @@ func (a *App) handleTaskModeration(ctx context.Context, msg *TelegramMessage, fi
 		return
 	}
 	a.sendWithKeyboard(ctx, msg.Chat.ID, "Task status updated: "+status, AdminKeyboard())
+}
+
+func (a *App) handleAccountStatusCommand(ctx context.Context, msg *TelegramMessage, fields []string, status string) {
+	if !a.requireAdmin(msg.Chat.ID, msg.From.ID) {
+		return
+	}
+	if len(fields) != 2 {
+		a.sendWithKeyboard(ctx, msg.Chat.ID, "Usage: /ban USER_ID, /unban USER_ID, /suspend USER_ID, or /restore USER_ID", AdminKeyboard())
+		return
+	}
+	targetID, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || targetID <= 0 {
+		a.sendPlain(ctx, msg.Chat.ID, "Invalid Telegram User ID.")
+		return
+	}
+	if a.IsAdmin(targetID) {
+		a.sendPlain(ctx, msg.Chat.ID, "For safety, Admin accounts cannot be changed from this command.")
+		return
+	}
+	if err := a.Users.SetStatus(ctx, targetID, status); err != nil {
+		a.sendPlain(ctx, msg.Chat.ID, "Could not update account status: "+err.Error())
+		return
+	}
+	label := status
+	if status == "active" {
+		label = "restored / active"
+	}
+	a.sendWithKeyboard(ctx, msg.Chat.ID, fmt.Sprintf("Account %d status updated: %s", targetID, label), AdminKeyboard())
+}
+
+func (a *App) handleTaskOwnerCommand(ctx context.Context, msg *TelegramMessage, fields []string, status string) {
+	if len(fields) != 2 {
+		a.sendPlain(ctx, msg.Chat.ID, "Usage: /pause_task TASK_ID, /resume_task TASK_ID, or /delete_task TASK_ID")
+		return
+	}
+	id, err := primitive.ObjectIDFromHex(fields[1])
+	if err != nil {
+		a.sendPlain(ctx, msg.Chat.ID, "Invalid Task ID.")
+		return
+	}
+	if !a.IsAdmin(msg.From.ID) {
+		user, userErr := a.Users.GetByTelegramID(ctx, msg.From.ID)
+		if userErr != nil || user.Role != "seller" {
+			a.sendPlain(ctx, msg.Chat.ID, "Only the task owner or an Admin can manage this task.")
+			return
+		}
+		paid, payErr := a.Payments.HasPaidSellerRegistration(ctx, msg.From.ID)
+		if payErr != nil || !paid {
+			a.sendPlain(ctx, msg.Chat.ID, "Verified Seller access is required.")
+			return
+		}
+	}
+	ownerID := int64(0)
+	if !a.IsAdmin(msg.From.ID) {
+		ownerID = msg.From.ID
+	}
+	if err := a.Marketplace.ChangeTaskStatus(ctx, id, ownerID, status); err != nil {
+		a.sendPlain(ctx, msg.Chat.ID, "Task could not be updated. Check the Task ID, ownership, and current status.")
+		return
+	}
+	a.sendWithKeyboard(ctx, msg.Chat.ID, "Task status updated: "+status, a.mainMenuKeyboard(ctx, msg.From.ID))
 }
 
 func (a *App) sendProfile(ctx context.Context, chatID, telegramID int64) {
