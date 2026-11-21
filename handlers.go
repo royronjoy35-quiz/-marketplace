@@ -17,31 +17,47 @@ import (
 const maxTelegramUpdateBytes = 1 << 20
 
 const (
-	menuMarketplace  = "🛍 Marketplace"
-	menuProfile      = "👤 My Profile"
-	menuOrders       = "📦 My Orders"
-	menuEarnings     = "💰 My Earnings"
-	menuWithdraw     = "🏦 Withdraw"
-	menuSupport      = "🎧 Support"
-	menuSeller       = "🏪 Seller Center"
-	menuCreateTask   = "➕ Create Task"
-	menuMyTasks      = "📋 My Tasks"
-	menuBecomeSeller = "🤝 Become Seller"
-	menuAdmin        = "🛡 Admin Panel"
-	menuPending      = "🕒 Pending Tasks"
-	menuMain         = "🏠 Main Menu"
-	menuCancel       = "❌ Cancel"
+	menuMarketplace = "🛍 Marketplace"
+	menuProfile     = "👤 My Profile"
+	menuOrders      = "📦 My Orders"
+	menuEarnings    = "💰 My Earnings"
+	menuWithdraw    = "🏦 Withdraw"
+	menuSupport     = "🎧 Support"
+	menuCreateTask  = "➕ Create Task"
+	menuMyTasks     = "📋 My Tasks"
+	menuWorkerTasks = "🧰 Available Tasks"
+	menuAdmin       = "🛡 Admin Panel"
+	menuPending     = "🕒 Pending Tasks"
+	menuMain        = "🏠 Main Menu"
+	menuCancel      = "❌ Cancel"
 )
 
 type TelegramUpdate struct {
-	UpdateID int64            `json:"update_id"`
-	Message  *TelegramMessage `json:"message,omitempty"`
+	UpdateID         int64             `json:"update_id"`
+	Message          *TelegramMessage  `json:"message,omitempty"`
+	PreCheckoutQuery *PreCheckoutQuery `json:"pre_checkout_query,omitempty"`
+}
+
+type PreCheckoutQuery struct {
+	ID             string       `json:"id"`
+	From           TelegramUser `json:"from"`
+	Currency       string       `json:"currency"`
+	TotalAmount    int64        `json:"total_amount"`
+	InvoicePayload string       `json:"invoice_payload"`
+}
+
+type SuccessfulPayment struct {
+	Currency                string `json:"currency"`
+	TotalAmount             int64  `json:"total_amount"`
+	InvoicePayload          string `json:"invoice_payload"`
+	TelegramPaymentChargeID string `json:"telegram_payment_charge_id"`
 }
 
 type TelegramMessage struct {
-	Text string        `json:"text,omitempty"`
-	Chat TelegramChat  `json:"chat"`
-	From *TelegramUser `json:"from,omitempty"`
+	Text              string             `json:"text,omitempty"`
+	Chat              TelegramChat       `json:"chat"`
+	From              *TelegramUser      `json:"from,omitempty"`
+	SuccessfulPayment *SuccessfulPayment `json:"successful_payment,omitempty"`
 }
 
 type TelegramChat struct {
@@ -59,6 +75,7 @@ type App struct {
 	Bot         *TelegramClient
 	Users       *UserStore
 	Marketplace *MarketplaceStore
+	Payments    *PaymentStore
 }
 
 func NewApp(cfg Config, db *Database, bot *TelegramClient) *App {
@@ -68,31 +85,56 @@ func NewApp(cfg Config, db *Database, bot *TelegramClient) *App {
 		Bot:         bot,
 		Users:       NewUserStore(db),
 		Marketplace: NewMarketplaceStore(db),
+		Payments:    NewPaymentStore(db),
 	}
 }
 
-func MainMenuKeyboard(isAdmin bool) *ReplyKeyboardMarkup {
-	rows := [][]ReplyKeyboardButton{
-		{{Text: menuMarketplace}, {Text: menuProfile}},
-		{{Text: menuOrders}, {Text: menuEarnings}},
-		{{Text: menuCreateTask}, {Text: menuSeller}},
-		{{Text: menuWithdraw}, {Text: menuSupport}},
-	}
+func MainMenuKeyboard(isAdmin, isSeller bool) *ReplyKeyboardMarkup {
 	if isAdmin {
-		rows = append(rows, []ReplyKeyboardButton{{Text: menuAdmin}})
+		return AdminKeyboard()
 	}
-	return &ReplyKeyboardMarkup{Keyboard: rows, ResizeKeyboard: true, IsPersistent: true, InputFieldPlaceholder: "Choose an option..."}
+	if isSeller {
+		return SellerKeyboard(false)
+	}
+	return UserKeyboard()
 }
 
-func SellerKeyboard(isAdmin bool) *ReplyKeyboardMarkup {
-	rows := [][]ReplyKeyboardButton{
-		{{Text: menuCreateTask}, {Text: menuMyTasks}},
-		{{Text: menuBecomeSeller}, {Text: menuMain}},
+// UserKeyboard never exposes Seller registration or Seller tools.
+func UserKeyboard() *ReplyKeyboardMarkup {
+	return &ReplyKeyboardMarkup{
+		Keyboard: [][]ReplyKeyboardButton{
+			{{Text: menuMarketplace}, {Text: menuProfile}},
+			{{Text: menuOrders}, {Text: menuEarnings}},
+			{{Text: menuWithdraw}, {Text: menuSupport}},
+		},
+		ResizeKeyboard: true, IsPersistent: true,
+		InputFieldPlaceholder: "Choose an option...",
 	}
-	if isAdmin {
-		rows = append(rows, []ReplyKeyboardButton{{Text: menuAdmin}})
+}
+
+// WorkerKeyboard is separate from User, Seller, and Admin menus.
+func WorkerKeyboard() *ReplyKeyboardMarkup {
+	return &ReplyKeyboardMarkup{
+		Keyboard: [][]ReplyKeyboardButton{
+			{{Text: menuMarketplace}, {Text: menuWorkerTasks}},
+			{{Text: menuOrders}, {Text: menuEarnings}},
+			{{Text: menuWithdraw}, {Text: menuSupport}},
+			{{Text: menuProfile}},
+		},
+		ResizeKeyboard: true, IsPersistent: true,
 	}
-	return &ReplyKeyboardMarkup{Keyboard: rows, ResizeKeyboard: true, IsPersistent: true}
+}
+
+// SellerKeyboard is shown only after a verified 100-Star payment.
+func SellerKeyboard(_ bool) *ReplyKeyboardMarkup {
+	return &ReplyKeyboardMarkup{
+		Keyboard: [][]ReplyKeyboardButton{
+			{{Text: menuCreateTask}, {Text: menuMyTasks}},
+			{{Text: menuMarketplace}, {Text: menuProfile}},
+			{{Text: menuMain}},
+		},
+		ResizeKeyboard: true, IsPersistent: true,
+	}
 }
 
 func AdminKeyboard() *ReplyKeyboardMarkup {
@@ -123,21 +165,38 @@ func (a *App) TelegramWebhookHandler() http.Handler {
 			http.Error(w, "invalid Telegram update", http.StatusBadRequest)
 			return
 		}
+		// Payment updates are processed before acknowledging the webhook so a successful
+		// payment is not lost if the process restarts immediately after an early HTTP 200.
+		if update.PreCheckoutQuery != nil || (update.Message != nil && update.Message.SuccessfulPayment != nil) {
+			a.ProcessUpdate(update)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		w.WriteHeader(http.StatusOK)
 		go a.ProcessUpdate(update)
 	})
 }
 
 func (a *App) ProcessUpdate(update TelegramUpdate) {
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+	defer cancel()
+
+	if update.PreCheckoutQuery != nil {
+		a.handlePreCheckout(ctx, update.PreCheckoutQuery)
+		return
+	}
 	if update.Message == nil || update.Message.From == nil {
 		return
 	}
 	msg := update.Message
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
 	if err := a.Users.UpsertTelegramUser(ctx, msg.From.ID, msg.From.Username, msg.From.FirstName); err != nil {
 		slog.Error("user registration failed", "error", err, "telegram_id", msg.From.ID)
+		return
+	}
+
+	if msg.SuccessfulPayment != nil {
+		a.handleSuccessfulSellerPayment(ctx, msg.Chat.ID, msg.From.ID, msg.SuccessfulPayment)
 		return
 	}
 
@@ -148,7 +207,7 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 
 	// A pending task draft takes priority over normal menu navigation.
 	draft, draftErr := a.Marketplace.GetDraft(ctx, msg.From.ID)
-	if draftErr == nil && text != menuCancel && text != "/cancel" {
+	if draftErr == nil && !strings.HasPrefix(text, "/") && text != menuCancel {
 		a.handleTaskDraft(ctx, msg, draft)
 		return
 	}
@@ -164,10 +223,13 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, fmt.Sprintf("Welcome, %s! 🚀\n\nWelcome to ⒹⓇ Marketplace.\nYour account is registered.\n\nChoose an option from the menu below.", safeName(msg.From.FirstName)))
 		return
 	case "/help":
-		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "ⒹⓇ Marketplace Help\n\nUse the menu buttons to navigate.\nUse /cancel to cancel an active task creation.")
+		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "ⒹⓇ Marketplace Help\n\nUse the menu buttons to navigate.\nSend /seller to request Seller registration (100 Telegram Stars). Use /cancel to cancel an active task creation.")
 		return
 	case "/status":
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "ⒹⓇ Marketplace is online.")
+		return
+	case "/seller":
+		a.becomeSeller(ctx, msg.Chat.ID, msg.From.ID)
 		return
 	case "/cancel":
 		_ = a.Marketplace.DeleteDraft(ctx, msg.From.ID)
@@ -191,6 +253,8 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 		a.sendProfile(ctx, msg.Chat.ID, msg.From.ID)
 	case menuMarketplace, "Marketplace":
 		a.sendTaskList(ctx, msg.Chat.ID, 0)
+	case menuWorkerTasks, "Available Tasks":
+		a.sendTaskList(ctx, msg.Chat.ID, 0)
 	case menuOrders, "My Orders":
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "📦 My Orders\n\nOrder processing will be enabled in the next development phase.")
 	case menuEarnings, "My Earnings":
@@ -199,10 +263,6 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "🏦 Withdraw\n\nUSDT withdrawals are not active yet. Please do not send funds to the bot.")
 	case menuSupport, "Support":
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "🎧 Support\n\nSupport tickets will be added in a later phase.")
-	case menuSeller, "Seller Center":
-		a.sendSellerCenter(ctx, msg.Chat.ID, msg.From.ID)
-	case menuBecomeSeller, "Become Seller":
-		a.becomeSeller(ctx, msg.Chat.ID, msg.From.ID)
 	case menuCreateTask, "Create Task":
 		a.beginTaskCreation(ctx, msg.Chat.ID, msg.From.ID)
 	case menuMyTasks, "My Tasks":
@@ -267,6 +327,17 @@ func (a *App) handleTaskDraft(ctx context.Context, msg *TelegramMessage, draft *
 			a.sendPlain(ctx, msg.Chat.ID, "Could not verify your account. Please try again.")
 			return
 		}
+		if !a.IsAdmin(msg.From.ID) {
+			paid, paymentErr := a.Payments.HasPaidSellerRegistration(ctx, msg.From.ID)
+			if paymentErr != nil || !paid || user.Role != "seller" {
+				if paymentErr == nil && !paid {
+					_ = a.Users.SetRole(ctx, msg.From.ID, "user")
+				}
+				_ = a.Marketplace.DeleteDraft(ctx, msg.From.ID)
+				a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "A verified 100 Stars Seller registration is required. Send /seller to receive the payment invoice.")
+				return
+			}
+		}
 		creatorRole := user.Role
 		status := TaskStatusPendingReview
 		if a.IsAdmin(msg.From.ID) {
@@ -281,7 +352,7 @@ func (a *App) handleTaskDraft(ctx context.Context, msg *TelegramMessage, draft *
 		}
 		_ = a.Marketplace.DeleteDraft(ctx, msg.From.ID)
 		if status == TaskStatusActive {
-			a.sendWithKeyboard(ctx, msg.Chat.ID, fmt.Sprintf("✅ Task created and published.\n\nTitle: %s\nReward: %s USDT\nSlots: %d\nTask ID: %s\n\nNote: Worker applications and payment escrow are not active yet.", task.Title, task.RewardUSDT, task.Slots, task.ID.Hex()), MainMenuKeyboard(a.IsAdmin(msg.From.ID)))
+			a.sendWithKeyboard(ctx, msg.Chat.ID, fmt.Sprintf("✅ Task created and published.\n\nTitle: %s\nReward: %s USDT\nSlots: %d\nTask ID: %s\n\nNote: Worker applications and payment escrow are not active yet.", task.Title, task.RewardUSDT, task.Slots, task.ID.Hex()), a.mainMenuKeyboard(ctx, msg.From.ID))
 		} else {
 			a.sendWithKeyboard(ctx, msg.Chat.ID, fmt.Sprintf("✅ Task submitted for Admin review.\n\nTitle: %s\nReward: %s USDT\nSlots: %d\nTask ID: %s\n\nIt will appear in Marketplace only after approval.", task.Title, task.RewardUSDT, task.Slots, task.ID.Hex()), SellerKeyboard(false))
 		}
@@ -297,9 +368,15 @@ func (a *App) beginTaskCreation(ctx context.Context, chatID, userID int64) {
 		a.sendPlain(ctx, chatID, "Unable to verify your account.")
 		return
 	}
-	if !a.IsAdmin(userID) && user.Role != "seller" {
-		a.sendWithKeyboard(ctx, chatID, "Only Admins and registered Sellers can create tasks. Open Seller Center and choose Become Seller first.", SellerKeyboard(false))
-		return
+	if !a.IsAdmin(userID) {
+		paid, paymentErr := a.Payments.HasPaidSellerRegistration(ctx, userID)
+		if paymentErr != nil || !paid || user.Role != "seller" {
+			if paymentErr == nil && user.Role == "seller" && !paid {
+				_ = a.Users.SetRole(ctx, userID, "user")
+			}
+			a.sendMainMenu(ctx, chatID, userID, "Seller access requires a verified one-time payment of 100 Telegram Stars. Send /seller to receive the official payment invoice.")
+			return
+		}
 	}
 	if err := a.Marketplace.StartDraft(ctx, userID); err != nil {
 		slog.Error("could not start task draft", "error", err)
@@ -311,40 +388,88 @@ func (a *App) beginTaskCreation(ctx context.Context, chatID, userID int64) {
 
 func (a *App) becomeSeller(ctx context.Context, chatID, userID int64) {
 	if a.IsAdmin(userID) {
-		a.sendWithKeyboard(ctx, chatID, "You already have Admin permissions and can create tasks.", AdminKeyboard())
+		a.sendWithKeyboard(ctx, chatID, "You already have Admin permissions. Seller registration is not required for Admin task management.", AdminKeyboard())
 		return
 	}
 	user, err := a.Users.GetByTelegramID(ctx, userID)
 	if err != nil {
-		a.sendPlain(ctx, chatID, "Unable to load your account.")
+		a.sendPlain(ctx, chatID, "Unable to load your account. Please try again.")
+		return
+	}
+	paid, paymentErr := a.Payments.HasPaidSellerRegistration(ctx, userID)
+	if paymentErr != nil {
+		a.sendPlain(ctx, chatID, "Could not verify your Seller payment history. Please try again.")
+		return
+	}
+	if paid {
+		if user.Role != "seller" {
+			if err := a.Users.SetRole(ctx, userID, "seller"); err != nil {
+				a.sendPlain(ctx, chatID, "Your previous payment is confirmed, but account activation is delayed. Please try again; do not pay again.")
+				return
+			}
+		}
+		a.sendWithKeyboard(ctx, chatID, "Your 100 Stars Seller registration is already verified. Here is your separate Seller menu.", SellerKeyboard(false))
 		return
 	}
 	if user.Role == "seller" {
-		a.sendWithKeyboard(ctx, chatID, "Your Seller account is already active. You can create and manage your tasks.", SellerKeyboard(false))
+		_ = a.Users.SetRole(ctx, userID, "user")
+	}
+
+	payment, err := a.Payments.CreateSellerPayment(ctx, userID)
+	if err != nil {
+		slog.Error("seller payment record creation failed", "error", err, "telegram_id", userID)
+		a.sendPlain(ctx, chatID, "Could not create a Seller registration invoice. Please try again.")
+		return
+	}
+
+	err = a.Bot.SendInvoice(ctx, chatID, "DR Marketplace Seller Access", "One-time Seller registration fee. Seller access activates only after Telegram confirms successful payment.", payment.Payload, SellerRegistrationStars)
+	if err != nil {
+		_ = a.Payments.ExpirePendingSellerPayment(ctx, payment.Payload, userID)
+		slog.Error("seller invoice send failed", "error", err, "telegram_id", userID)
+		a.sendPlain(ctx, chatID, "Could not send the Stars invoice. Please try again later.")
+		return
+	}
+	a.sendPlain(ctx, chatID, "⭐ Your 100 Telegram Stars Seller registration invoice is ready above.\n\nComplete the payment in Telegram. Your separate Seller menu will appear automatically only after Telegram confirms successful payment.\n\nTo request a new invoice later, send /seller again.")
+}
+
+func (a *App) handlePreCheckout(ctx context.Context, query *PreCheckoutQuery) {
+	if query == nil {
+		return
+	}
+	payment, err := a.Payments.GetSellerPayment(ctx, query.InvoicePayload, query.From.ID)
+	if err != nil || payment.Status != sellerPaymentPending || time.Now().UTC().After(payment.ExpiresAt) || query.Currency != "XTR" || query.TotalAmount != SellerRegistrationStars || payment.Currency != "XTR" || payment.Amount != SellerRegistrationStars {
+		if err := a.Bot.AnswerPreCheckoutQuery(ctx, query.ID, false, "This Seller invoice is invalid or expired. Please request a new invoice from Seller Center."); err != nil {
+			slog.Error("pre-checkout rejection failed", "error", err, "telegram_id", query.From.ID)
+		}
+		return
+	}
+	if err := a.Bot.AnswerPreCheckoutQuery(ctx, query.ID, true, ""); err != nil {
+		slog.Error("pre-checkout approval failed", "error", err, "telegram_id", query.From.ID)
+	}
+}
+
+func (a *App) handleSuccessfulSellerPayment(ctx context.Context, chatID, userID int64, payment *SuccessfulPayment) {
+	if payment == nil || payment.Currency != "XTR" || payment.TotalAmount != SellerRegistrationStars || payment.TelegramPaymentChargeID == "" {
+		slog.Error("invalid seller successful payment update", "telegram_id", userID)
+		a.sendPlain(ctx, chatID, "Payment details could not be verified. Please contact support and do not pay again.")
+		return
+	}
+	if err := a.Payments.MarkSellerPaymentPaid(ctx, payment.InvoicePayload, userID, payment.TelegramPaymentChargeID); err != nil {
+		slog.Error("seller payment verification failed", "error", err, "telegram_id", userID)
+		a.sendPlain(ctx, chatID, "Your payment could not be matched to a valid Seller invoice. Please contact support.")
 		return
 	}
 	if err := a.Users.SetRole(ctx, userID, "seller"); err != nil {
-		a.sendPlain(ctx, chatID, "Could not activate Seller access. Please try again.")
+		slog.Error("seller role activation after payment failed", "error", err, "telegram_id", userID)
+		a.sendPlain(ctx, chatID, "Your 100 Stars payment is confirmed, but account activation is delayed. Please contact support; do not pay again.")
 		return
 	}
-	a.sendWithKeyboard(ctx, chatID, "🎉 Seller access activated.\n\nYou can now create tasks. New Seller tasks require Admin approval before appearing in the Marketplace.", SellerKeyboard(false))
+	a.sendWithKeyboard(ctx, chatID, "🎉 Payment confirmed: 100 Telegram Stars. Your Seller account is now active. Your separate Seller menu is now enabled.", SellerKeyboard(false))
 }
 
 func (a *App) sendSellerCenter(ctx context.Context, chatID, userID int64) {
-	user, err := a.Users.GetByTelegramID(ctx, userID)
-	if err != nil {
-		a.sendPlain(ctx, chatID, "Unable to load Seller Center.")
-		return
-	}
-	if a.IsAdmin(userID) {
-		a.sendWithKeyboard(ctx, chatID, "🏪 Seller Center\n\nAdmin task creation is available. Seller submissions require review.", AdminKeyboard())
-		return
-	}
-	if user.Role == "seller" {
-		a.sendWithKeyboard(ctx, chatID, "🏪 Seller Center\n\nYour Seller account is active. You can create tasks and view your submissions.", SellerKeyboard(false))
-	} else {
-		a.sendWithKeyboard(ctx, chatID, "🏪 Seller Center\n\nBecome a Seller to submit tasks to the Marketplace. All Seller tasks are reviewed by Admin before publication.", SellerKeyboard(false))
-	}
+	// Seller Center is no longer a menu button. /seller is the only entry point.
+	a.becomeSeller(ctx, chatID, userID)
 }
 
 func (a *App) sendTaskList(ctx context.Context, chatID, creatorID int64) {
@@ -433,13 +558,47 @@ func (a *App) sendProfile(ctx context.Context, chatID, telegramID int64) {
 	role := user.Role
 	if a.IsAdmin(telegramID) {
 		role = "admin"
+	} else if role == "seller" {
+		paid, paymentErr := a.Payments.HasPaidSellerRegistration(ctx, telegramID)
+		if paymentErr != nil || !paid {
+			role = "user"
+			if paymentErr == nil {
+				_ = a.Users.SetRole(ctx, telegramID, "user")
+			}
+		}
 	}
 	profile := fmt.Sprintf("👤 MY PROFILE\n\nName: %s\nUsername: %s\nTelegram ID: %d\nAccount Type: %s\nStatus: %s\nJoined: %s", safeName(user.FirstName), username, user.TelegramID, role, user.Status, user.CreatedAt.UTC().Format("02 Jan 2006"))
 	a.sendMainMenu(ctx, chatID, telegramID, profile)
 }
 
 func (a *App) sendMainMenu(ctx context.Context, chatID, userID int64, text string) {
-	a.sendWithKeyboard(ctx, chatID, text, MainMenuKeyboard(a.IsAdmin(userID)))
+	a.sendWithKeyboard(ctx, chatID, text, a.mainMenuKeyboard(ctx, userID))
+}
+
+func (a *App) mainMenuKeyboard(ctx context.Context, userID int64) *ReplyKeyboardMarkup {
+	if a.IsAdmin(userID) {
+		return AdminKeyboard()
+	}
+
+	user, err := a.Users.GetByTelegramID(ctx, userID)
+	if err != nil {
+		return UserKeyboard()
+	}
+
+	if user.Role == "seller" {
+		paid, paymentErr := a.Payments.HasPaidSellerRegistration(ctx, userID)
+		if paymentErr == nil && paid {
+			return SellerKeyboard(false)
+		}
+		if paymentErr == nil {
+			_ = a.Users.SetRole(ctx, userID, "user")
+		}
+	}
+
+	if user.Role == "worker" {
+		return WorkerKeyboard()
+	}
+	return UserKeyboard()
 }
 
 func (a *App) sendWithKeyboard(ctx context.Context, chatID int64, text string, keyboard *ReplyKeyboardMarkup) {
