@@ -47,21 +47,23 @@ type Withdrawal struct {
 }
 
 type Task struct {
-	ID            primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	CreatorID     int64              `bson:"creator_id" json:"creator_id"`
-	CreatorRole   string             `bson:"creator_role" json:"creator_role"`
-	Title         string             `bson:"title" json:"title"`
-	Description   string             `bson:"description" json:"description"`
-	RewardUSDT    string             `bson:"reward_usdt" json:"reward_usdt"`
-	BudgetUSDT    string             `bson:"budget_usdt,omitempty" json:"budget_usdt,omitempty"`
-	Slots         int                `bson:"slots" json:"slots"`
-	Status        string             `bson:"status" json:"status"`
-	FundingStatus string             `bson:"funding_status,omitempty" json:"funding_status,omitempty"`
-	FundingTxHash string             `bson:"funding_tx_hash,omitempty" json:"funding_tx_hash,omitempty"`
-	FundedBy      int64              `bson:"funded_by,omitempty" json:"funded_by,omitempty"`
-	FundedAt      *time.Time         `bson:"funded_at,omitempty" json:"funded_at,omitempty"`
-	CreatedAt     time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt     time.Time          `bson:"updated_at" json:"updated_at"`
+	ID                primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	CreatorID         int64              `bson:"creator_id" json:"creator_id"`
+	CreatorRole       string             `bson:"creator_role" json:"creator_role"`
+	Title             string             `bson:"title" json:"title"`
+	Description       string             `bson:"description" json:"description"`
+	RewardUSDT        string             `bson:"reward_usdt" json:"reward_usdt"`
+	BudgetUSDT        string             `bson:"budget_usdt,omitempty" json:"budget_usdt,omitempty"`
+	Slots             int                `bson:"slots" json:"slots"`
+	Status            string             `bson:"status" json:"status"`
+	FundingStatus     string             `bson:"funding_status,omitempty" json:"funding_status,omitempty"`
+	FundingTxHash     string             `bson:"funding_tx_hash,omitempty" json:"funding_tx_hash,omitempty"`
+	VerificationMode  string             `bson:"verification_mode,omitempty" json:"verification_mode,omitempty"`
+	VerificationValue string             `bson:"verification_value,omitempty" json:"verification_value,omitempty"`
+	FundedBy          int64              `bson:"funded_by,omitempty" json:"funded_by,omitempty"`
+	FundedAt          *time.Time         `bson:"funded_at,omitempty" json:"funded_at,omitempty"`
+	CreatedAt         time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt         time.Time          `bson:"updated_at" json:"updated_at"`
 }
 
 type TaskDraft struct {
