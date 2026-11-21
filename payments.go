@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	SellerRegistrationStars int64 = 100
+	SellerRegistrationStars int64 = 1
 	sellerPaymentPending          = "pending"
 	sellerPaymentPaid             = "paid"
 	sellerPaymentExpired          = "expired"
