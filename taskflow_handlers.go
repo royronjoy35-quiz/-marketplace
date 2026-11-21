@@ -359,11 +359,20 @@ func (a *App) sendSellerSubmissions(ctx context.Context, chatID, userID int64) {
 		return
 	}
 	for _, sub := range subs {
-		text := fmt.Sprintf("📥 WORK SUBMISSION\nWorker: %d\nProof:\n%s\nSubmission ID: %s", sub.WorkerID, sub.Proof, sub.ID.Hex())
+		text := fmt.Sprintf("📥 WORK SUBMISSION\nWorker: %d\nStatus: %s\nProof:\n%s\nSubmission ID: %s", sub.WorkerID, sub.Status, sub.Proof, sub.ID.Hex())
+		if sub.PrecheckStatus != "" {
+			text += "\nPre-check: " + sub.PrecheckStatus
+		}
+		if sub.Status == "flagged_review" && sub.ReviewNote != "" {
+			text += "\n⚠️ Strict risk flags: " + sub.ReviewNote
+		}
 		if strings.HasPrefix(sub.Proof, "photo_file_id:") {
 			fileID := strings.TrimPrefix(strings.SplitN(sub.Proof, "\n", 2)[0], "photo_file_id:")
 			_ = a.Bot.SendPhoto(ctx, chatID, fileID, fmt.Sprintf("Worker %d — submitted proof", sub.WorkerID))
-			text = fmt.Sprintf("📥 WORK SUBMISSION\nWorker: %d\nPhoto proof attached above\nSubmission ID: %s", sub.WorkerID, sub.ID.Hex())
+			text = fmt.Sprintf("📥 WORK SUBMISSION\nWorker: %d\nStatus: %s\nPhoto proof attached above\nPre-check: %s\nSubmission ID: %s", sub.WorkerID, sub.Status, sub.PrecheckStatus, sub.ID.Hex())
+			if sub.Status == "flagged_review" && sub.ReviewNote != "" {
+				text += "\n⚠️ Strict risk flags: " + sub.ReviewNote
+			}
 		}
 		kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
 			{{Text: "✅ Approve", CallbackData: "reviewok:" + sub.ID.Hex()}, {Text: "✏️ Revision", CallbackData: "reviewrev:" + sub.ID.Hex()}},
