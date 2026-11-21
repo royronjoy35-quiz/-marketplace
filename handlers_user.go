@@ -747,7 +747,7 @@ func (a *BotApp) CallbackHandler(ctx context.Context, b *bot.Bot, update *models
 		if remaining.IsNegative() {
 			remaining = decimal.Zero
 		}
-		fullName := telegramFullName(q.From)
+		fullName := telegramFullName(&q.From)
 		adminNotice := fmt.Sprintf("📨 <b>Daily Sell Limit Increase Request</b>\n\n👤 User: <b>%s</b>\n🏷️ Username: <b>@%s</b>\n🆔 User ID: <code>%d</code>\n📅 আজকের Daily Limit: <b>%s USDT</b>\n✅ আজ ইতিমধ্যে বিক্রি: <b>%s USDT</b>\n📉 বর্তমানে বাকি: <b>%s USDT</b>\n💰 User-এর চাওয়া Sell Amount: <b>%s USDT</b>\n\nঅনুগ্রহ করে সিদ্ধান্ত নিন:", safeText(fullName), safeText(q.From.Username), userID, daily, sold, remaining, requested)
 		limitKB := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{{Text: "✅ Receive this", CallbackData: fmt.Sprintf("accept_limit:%d:%s", userID, requested)}, {Text: "❌ Reject Request", CallbackData: fmt.Sprintf("reject_limit:%d", userID)}}}}
 		if _, sendErr := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: a.Config.AdminID, Text: adminNotice, ParseMode: models.ParseModeHTML, ReplyMarkup: limitKB}); sendErr != nil {
