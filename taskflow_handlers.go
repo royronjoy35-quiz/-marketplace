@@ -20,6 +20,14 @@ func (a *App) handleCallbackQuery(ctx context.Context, q *TelegramCallbackQuery)
 		chatID = q.Message.Chat.ID
 	}
 	_ = a.Bot.AnswerCallbackQuery(ctx, q.ID, "")
+	if strings.HasPrefix(q.Data, "tw:") {
+		a.handleTaskWizardCallback(ctx, q)
+		return
+	}
+	if strings.HasPrefix(q.Data, "wallet:") {
+		a.handleWalletCallback(ctx, q)
+		return
+	}
 	if !a.IsAdmin(q.From.ID) {
 		u, err := a.Users.GetByTelegramID(ctx, q.From.ID)
 		if err != nil || u.Status == "banned" || u.Status == "suspended" {
@@ -174,11 +182,24 @@ func (a *App) handleCallbackQuery(ctx context.Context, q *TelegramCallbackQuery)
 		if action == "modreject" {
 			status = TaskStatusRejected
 		}
-		if err := a.Marketplace.UpdateTaskStatus(ctx, id, status); err != nil {
-			a.sendPlain(ctx, chatID, "Task could not be moderated. It may already have been reviewed.")
+		moderatedTask, _ := a.TaskFlow.GetTask(ctx, id)
+		if action == "modreject" {
+			if err := a.Wallet.RefundRejectedTask(ctx, id); err != nil {
+				a.sendPlain(ctx, chatID, "Task rejection/refund failed: "+err.Error())
+				return
+			}
+		} else if err := a.Wallet.ApproveFundedTask(ctx, id); err != nil {
+			a.sendPlain(ctx, chatID, "Task approval failed: "+err.Error())
 			return
 		}
-		a.sendPlain(ctx, chatID, "Task moderation complete: "+status)
+		a.sendPlain(ctx, chatID, "Task moderation complete: "+status+". The Seller owner-share was released only after approval; rejected funded tasks are refunded.")
+		if moderatedTask != nil && moderatedTask.CreatorID != q.From.ID {
+			if action == "modapprove" {
+				a.sendPlain(ctx, moderatedTask.CreatorID, "✅ Your Task was approved and is now visible in Marketplace. Owner revenue was released and the Worker pool remains reserved.")
+			} else {
+				a.sendPlain(ctx, moderatedTask.CreatorID, "❌ Your Task was rejected. The full original investment has been returned to your Seller Wallet.")
+			}
+		}
 	case "reviewok", "reviewrev", "reviewno":
 		var sub TaskSubmission
 		if err := a.TaskFlow.submissions.FindOne(ctx, bson.M{"_id": id}).Decode(&sub); err != nil {
@@ -359,20 +380,11 @@ func (a *App) sendSellerSubmissions(ctx context.Context, chatID, userID int64) {
 		return
 	}
 	for _, sub := range subs {
-		text := fmt.Sprintf("📥 WORK SUBMISSION\nWorker: %d\nStatus: %s\nProof:\n%s\nSubmission ID: %s", sub.WorkerID, sub.Status, sub.Proof, sub.ID.Hex())
-		if sub.PrecheckStatus != "" {
-			text += "\nPre-check: " + sub.PrecheckStatus
-		}
-		if sub.Status == "flagged_review" && sub.ReviewNote != "" {
-			text += "\n⚠️ Strict risk flags: " + sub.ReviewNote
-		}
+		text := fmt.Sprintf("📥 WORK SUBMISSION\nWorker: %d\nProof:\n%s\nSubmission ID: %s", sub.WorkerID, sub.Proof, sub.ID.Hex())
 		if strings.HasPrefix(sub.Proof, "photo_file_id:") {
 			fileID := strings.TrimPrefix(strings.SplitN(sub.Proof, "\n", 2)[0], "photo_file_id:")
 			_ = a.Bot.SendPhoto(ctx, chatID, fileID, fmt.Sprintf("Worker %d — submitted proof", sub.WorkerID))
-			text = fmt.Sprintf("📥 WORK SUBMISSION\nWorker: %d\nStatus: %s\nPhoto proof attached above\nPre-check: %s\nSubmission ID: %s", sub.WorkerID, sub.Status, sub.PrecheckStatus, sub.ID.Hex())
-			if sub.Status == "flagged_review" && sub.ReviewNote != "" {
-				text += "\n⚠️ Strict risk flags: " + sub.ReviewNote
-			}
+			text = fmt.Sprintf("📥 WORK SUBMISSION\nWorker: %d\nPhoto proof attached above\nSubmission ID: %s", sub.WorkerID, sub.ID.Hex())
 		}
 		kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
 			{{Text: "✅ Approve", CallbackData: "reviewok:" + sub.ID.Hex()}, {Text: "✏️ Revision", CallbackData: "reviewrev:" + sub.ID.Hex()}},
