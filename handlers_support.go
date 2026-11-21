@@ -261,8 +261,15 @@ func (a *BotApp) SupportCallbackHandler(ctx context.Context, b *bot.Bot, update 
 	data := q.Data
 	if data == "close_faq" {
 		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: q.ID})
-		if q.Message != nil {
-			_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{ChatID: q.Message.Chat.ID, MessageID: q.Message.ID, Text: "❓ Help Center বন্ধ করা হয়েছে।"})
+		// CallbackQuery.Message is a MaybeInaccessibleMessage value in
+		// go-telegram/bot v1.15.0. Only the Message variant can be edited.
+		if q.Message.Message != nil {
+			msg := q.Message.Message
+			_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+				ChatID:    msg.Chat.ID,
+				MessageID: msg.ID,
+				Text:      "❓ Help Center বন্ধ করা হয়েছে।",
+			})
 		}
 		return true
 	}
