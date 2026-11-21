@@ -55,5 +55,36 @@ func EnsureIndexes(ctx context.Context, db *Database) error {
 		Keys:    bson.D{{Key: "proof_hash", Value: 1}},
 		Options: options.Index().SetUnique(true).SetSparse(true).SetName("uniq_task_submission_proof_hash"),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	_, err = db.DB.Collection("verification_receipts").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "nonce", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("uniq_verification_receipt_nonce"),
+	})
+	if err != nil {
+		return err
+	}
+	_, err = db.DB.Collection("verification_receipts").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "created_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(30 * 24 * 60 * 60).SetName("ttl_verification_receipts_30d"),
+	})
+	if err != nil {
+		return err
+	}
+	indexes := []struct {
+		collection string
+		model      mongo.IndexModel
+	}{
+		{"task_wizards", mongo.IndexModel{Keys: bson.D{{Key: "telegram_id", Value: 1}}, Options: options.Index().SetUnique(true).SetName("uniq_task_wizard_user")}},
+		{"wallet_topup_payments", mongo.IndexModel{Keys: bson.D{{Key: "telegram_id", Value: 1}, {Key: "created_at", Value: -1}}, Options: options.Index().SetName("wallet_topup_user_created")}},
+		{"wallet_topup_payments", mongo.IndexModel{Keys: bson.D{{Key: "telegram_charge_id", Value: 1}}, Options: options.Index().SetUnique(true).SetSparse(true).SetName("uniq_wallet_telegram_charge")}},
+		{"task_escrows", mongo.IndexModel{Keys: bson.D{{Key: "task_id", Value: 1}}, Options: options.Index().SetUnique(true).SetName("uniq_task_escrow")}},
+	}
+	for _, item := range indexes {
+		if _, err := db.DB.Collection(item.collection).Indexes().CreateOne(ctx, item.model); err != nil {
+			return err
+		}
+	}
+	return nil
 }
