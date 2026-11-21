@@ -32,16 +32,18 @@ type TaskApplication struct {
 }
 
 type TaskSubmission struct {
-	ID            primitive.ObjectID `bson:"_id,omitempty"`
-	ApplicationID primitive.ObjectID `bson:"application_id"`
-	TaskID        primitive.ObjectID `bson:"task_id"`
-	WorkerID      int64              `bson:"worker_id"`
-	SellerID      int64              `bson:"seller_id"`
-	Proof         string             `bson:"proof"`
-	Status        string             `bson:"status"`
-	ReviewNote    string             `bson:"review_note,omitempty"`
-	CreatedAt     time.Time          `bson:"created_at"`
-	UpdatedAt     time.Time          `bson:"updated_at"`
+	ID             primitive.ObjectID `bson:"_id,omitempty"`
+	ApplicationID  primitive.ObjectID `bson:"application_id"`
+	TaskID         primitive.ObjectID `bson:"task_id"`
+	WorkerID       int64              `bson:"worker_id"`
+	SellerID       int64              `bson:"seller_id"`
+	Proof          string             `bson:"proof"`
+	ProofHash      string             `bson:"proof_hash,omitempty"`
+	PrecheckStatus string             `bson:"precheck_status,omitempty"`
+	Status         string             `bson:"status"`
+	ReviewNote     string             `bson:"review_note,omitempty"`
+	CreatedAt      time.Time          `bson:"created_at"`
+	UpdatedAt      time.Time          `bson:"updated_at"`
 }
 
 type TaskFlowStore struct {
@@ -50,6 +52,7 @@ type TaskFlowStore struct {
 	sessions     *mongo.Collection
 	ledger       *mongo.Collection
 	tasks        *mongo.Collection
+	users        *mongo.Collection
 }
 
 func NewTaskFlowStore(db *Database) *TaskFlowStore {
@@ -59,6 +62,7 @@ func NewTaskFlowStore(db *Database) *TaskFlowStore {
 		sessions:     db.DB.Collection("task_sessions"),
 		ledger:       db.DB.Collection("earnings_ledger"),
 		tasks:        db.DB.Collection("tasks"),
+		users:        db.DB.Collection("users"),
 	}
 }
 
@@ -174,18 +178,37 @@ func (s *TaskFlowStore) Submit(ctx context.Context, workerID int64, appID primit
 	if err := s.applications.FindOne(ctx, bson.M{"_id": appID, "worker_id": workerID, "status": bson.M{"$in": []string{AppStatusAccepted, AppStatusRevision}}}).Decode(&app); err != nil {
 		return fmt.Errorf("application is not currently accepted")
 	}
+	task, err := s.GetTask(ctx, app.TaskID)
+	if err != nil {
+		return fmt.Errorf("task could not be loaded")
+	}
+	decision := s.evaluateSubmission(ctx, workerID, *task, proof)
 	now := time.Now().UTC()
 	sub := TaskSubmission{
-		ApplicationID: app.ID, TaskID: app.TaskID, WorkerID: workerID,
-		SellerID: app.SellerID, Proof: proof, Status: "pending_review",
+		ID: primitive.NewObjectID(), ApplicationID: app.ID, TaskID: app.TaskID,
+		WorkerID: workerID, SellerID: app.SellerID, Proof: proof, ProofHash: decision.ProofHash,
+		PrecheckStatus: decision.PrecheckStatus, Status: decision.Status, ReviewNote: strings.Join(decision.Flags, ","),
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if _, err := s.submissions.InsertOne(ctx, sub); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("this proof has already been submitted; duplicate evidence was blocked")
+		}
 		return err
 	}
-	_, err := s.applications.UpdateOne(ctx, bson.M{"_id": appID, "worker_id": workerID, "status": bson.M{"$in": []string{AppStatusAccepted, AppStatusRevision}}},
-		bson.M{"$set": bson.M{"status": AppStatusSubmitted, "updated_at": now}})
-	return err
+	res, err := s.applications.UpdateOne(ctx,
+		bson.M{"_id": appID, "worker_id": workerID, "status": bson.M{"$in": []string{AppStatusAccepted, AppStatusRevision}}},
+		bson.M{"$set": bson.M{"status": AppStatusSubmitted, "updated_at": now}},
+	)
+	if err != nil {
+		_, _ = s.submissions.DeleteOne(ctx, bson.M{"_id": sub.ID})
+		return err
+	}
+	if res.MatchedCount == 0 {
+		_, _ = s.submissions.DeleteOne(ctx, bson.M{"_id": sub.ID})
+		return fmt.Errorf("application changed while the proof was being submitted")
+	}
+	return nil
 }
 
 func (s *TaskFlowStore) ListWorkerApplications(ctx context.Context, workerID int64) ([]TaskApplication, error) {
@@ -201,7 +224,7 @@ func (s *TaskFlowStore) ListWorkerApplications(ctx context.Context, workerID int
 }
 
 func (s *TaskFlowStore) ListSellerSubmissions(ctx context.Context, sellerID int64) ([]TaskSubmission, error) {
-	filter := bson.M{"status": "pending_review"}
+	filter := bson.M{"status": bson.M{"$in": []string{"pending_review", "flagged_review"}}}
 	if sellerID > 0 {
 		filter["seller_id"] = sellerID
 	}
@@ -221,11 +244,11 @@ func (s *TaskFlowStore) ReviewSubmission(ctx context.Context, submissionID primi
 		return fmt.Errorf("invalid review action")
 	}
 	var sub TaskSubmission
-	if err := s.submissions.FindOne(ctx, bson.M{"_id": submissionID, "seller_id": sellerID, "status": "pending_review"}).Decode(&sub); err != nil {
+	if err := s.submissions.FindOne(ctx, bson.M{"_id": submissionID, "seller_id": sellerID, "status": bson.M{"$in": []string{"pending_review", "flagged_review"}}}).Decode(&sub); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
-	res, err := s.submissions.UpdateOne(ctx, bson.M{"_id": submissionID, "seller_id": sellerID, "status": "pending_review"},
+	res, err := s.submissions.UpdateOne(ctx, bson.M{"_id": submissionID, "seller_id": sellerID, "status": bson.M{"$in": []string{"pending_review", "flagged_review"}}},
 		bson.M{"$set": bson.M{"status": action, "review_note": note, "updated_at": now}})
 	if err != nil {
 		return err
