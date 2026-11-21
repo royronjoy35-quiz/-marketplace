@@ -23,13 +23,12 @@ type ReplyKeyboardButton struct {
 }
 
 type ReplyKeyboardMarkup struct {
-	Keyboard                [][]ReplyKeyboardButton `json:"keyboard"`
-	ResizeKeyboard          bool                    `json:"resize_keyboard"`
-	IsPersistent            bool                    `json:"is_persistent,omitempty"`
-	InputFieldPlaceholder   string                  `json:"input_field_placeholder,omitempty"`
-	OneTimeKeyboard         bool                    `json:"one_time_keyboard,omitempty"`
+    Keyboard              [][]ReplyKeyboardButton `json:"keyboard"`
+    ResizeKeyboard        bool                    `json:"resize_keyboard"`
+    IsPersistent          bool                    `json:"is_persistent"`
+    OneTimeKeyboard       bool                    `json:"one_time_keyboard"`
+    InputFieldPlaceholder string                  `json:"input_field_placeholder,omitempty"`
 }
-
 type LabeledPrice struct {
 	Label  string `json:"label"`
 	Amount int64  `json:"amount"`
