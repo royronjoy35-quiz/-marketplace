@@ -48,5 +48,12 @@ func EnsureIndexes(ctx context.Context, db *Database) error {
 		Keys:    bson.D{{Key: "submission_id", Value: 1}},
 		Options: options.Index().SetUnique(true).SetName("uniq_earning_submission"),
 	})
+	if err != nil {
+		return err
+	}
+	_, err = db.DB.Collection("task_submissions").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "proof_hash", Value: 1}},
+		Options: options.Index().SetUnique(true).SetSparse(true).SetName("uniq_task_submission_proof_hash"),
+	})
 	return err
 }
