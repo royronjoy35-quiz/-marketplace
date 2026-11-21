@@ -69,3 +69,15 @@ type TaskDraft struct {
 	CreatedAt   time.Time `bson:"created_at"`
 	UpdatedAt   time.Time `bson:"updated_at"`
 }
+
+type SellerPayment struct {
+	Payload          string     `bson:"_id" json:"payload"`
+	TelegramID       int64      `bson:"telegram_id" json:"telegram_id"`
+	Currency         string     `bson:"currency" json:"currency"`
+	Amount           int64      `bson:"amount" json:"amount"`
+	Status           string     `bson:"status" json:"status"`
+	TelegramChargeID string     `bson:"telegram_charge_id,omitempty" json:"telegram_charge_id,omitempty"`
+	CreatedAt        time.Time  `bson:"created_at" json:"created_at"`
+	ExpiresAt        time.Time  `bson:"expires_at" json:"expires_at"`
+	PaidAt           *time.Time `bson:"paid_at,omitempty" json:"paid_at,omitempty"`
+}
