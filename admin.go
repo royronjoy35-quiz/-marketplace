@@ -50,7 +50,7 @@ func (a *App) sendAdminDashboard(ctx context.Context, chatID, userID int64) {
 	}
 
 	message := fmt.Sprintf(
-		"🛡 ADMIN DASHBOARD\n\n👥 Total users: %s\n🏪 Sellers: %s\n🧰 Workers: %s\n\n📚 Active tasks: %s\n🕒 Pending tasks: %s\n\n⭐ Paid Seller registrations: %s\n🏦 Pending withdrawals: %s\n\nUpdated: %s UTC",
+		"🛡 ADMIN DASHBOARD\n\n👥 Total users: %s\n🏪 Sellers: %s\n🧰 Workers: %s\n\n📚 Active tasks: %s\n🕒 Pending tasks: %s\n\n⭐ Paid Seller registrations: %s\n🏦 Pending withdrawals: %s\n\nUpdated: %s UTC\n\nQUICK ACTIONS\n/ban USER_ID · /unban USER_ID\n/suspend USER_ID · /restore USER_ID\n/approve_task TASK_ID · /reject_task TASK_ID\n/pause_task TASK_ID · /resume_task TASK_ID · /delete_task TASK_ID",
 		format(count(users, bson.M{})),
 		format(count(users, bson.M{"role": "seller"})),
 		format(count(users, bson.M{"role": "worker"})),
@@ -74,7 +74,7 @@ func (a *App) sendAdminTaskList(ctx context.Context, chatID, userID int64) {
 		a.sendPlain(ctx, chatID, "Could not load Marketplace tasks.")
 		return
 	}
-	message := "📚 ALL MARKETPLACE TASKS\n\n" + FormatTaskList(tasks, "No tasks have been created yet.")
+	message := "📚 ALL MARKETPLACE TASKS\n\n" + FormatTaskList(tasks, "No tasks have been created yet.") + "\n\nTask actions:\n/approve_task TASK_ID\n/reject_task TASK_ID\n/pause_task TASK_ID\n/resume_task TASK_ID\n/delete_task TASK_ID"
 	a.sendWithKeyboard(ctx, chatID, message, AdminKeyboard())
 }
 
@@ -127,6 +127,7 @@ func (a *App) sendAdminUserList(ctx context.Context, chatID, userID int64, role 
 			)
 		}
 	}
+	b.WriteString("\nAccount actions (Telegram ID):\n/ban USER_ID\n/unban USER_ID\n/suspend USER_ID\n/restore USER_ID")
 	a.sendWithKeyboard(ctx, chatID, b.String(), AdminKeyboard())
 }
 
@@ -213,6 +214,7 @@ func (a *App) sendAdminWithdrawals(ctx context.Context, chatID, userID int64) {
 			fmt.Fprintf(&b, "• User: %d | %s USDT | %s | %s\n", record.UserID, record.AmountUSDT, record.Network, record.Status)
 		}
 	}
+	b.WriteString("\nManual review commands:\n/approve_withdraw WITHDRAWAL_ID\n/reject_withdraw WITHDRAWAL_ID\n/mark_withdraw_paid WITHDRAWAL_ID TX_HASH\n\nMarking paid records an Admin-supplied transaction hash; it does not broadcast or verify a blockchain transfer.")
 	a.sendWithKeyboard(ctx, chatID, b.String(), AdminKeyboard())
 }
 
@@ -247,9 +249,64 @@ func (a *App) sendAdminSettings(ctx context.Context, chatID, userID int64) {
 		return
 	}
 
+	threshold := "Not configured"
+	var setting struct {
+		Value string `bson:"value"`
+	}
+	if err := a.DB.DB.Collection("marketplace_settings").FindOne(ctx, bson.M{"_id": "auto_withdraw_threshold"}).Decode(&setting); err == nil && setting.Value != "" {
+		threshold = setting.Value + " USDT"
+	}
 	message := fmt.Sprintf(
-		"⚙️ MARKETPLACE SETTINGS\n\nSeller registration: %d Telegram Star(s), one-time\nWithdrawal network: BEP-20\nWithdrawal mode: Hybrid\nBitget wallet funding: Friday\nAutomatic withdrawal threshold: Not configured yet\n\nEditable financial settings will be added with the wallet module.",
-		SellerRegistrationStars,
+		"⚙️ MARKETPLACE SETTINGS\n\nSeller registration: %d Telegram Star(s), one-time\nWithdrawal network: BEP-20\nWithdrawal mode: Hybrid\nBitget wallet funding: Friday\nAutomatic withdrawal threshold: %s\n\nSet threshold: /set_auto_withdraw_threshold AMOUNT\nExample: /set_auto_withdraw_threshold 5\n\nNote: This value is stored for configuration. Automatic blockchain payouts are not enabled by this setting alone.",
+		SellerRegistrationStars, threshold,
 	)
 	a.sendWithKeyboard(ctx, chatID, message, AdminKeyboard())
+}
+
+// handleWithdrawalCommand performs database state transitions only. It does not
+// send USDT; an Admin must verify the real BEP-20 transfer before marking paid.
+func (a *App) handleWithdrawalCommand(ctx context.Context, msg *TelegramMessage, fields []string, action string) {
+	if !a.requireAdmin(msg.Chat.ID, msg.From.ID) {
+		return
+	}
+	if action == "paid" {
+		if len(fields) != 3 || strings.TrimSpace(fields[2]) == "" {
+			a.sendPlain(ctx, msg.Chat.ID, "Usage: /mark_withdraw_paid WITHDRAWAL_ID TX_HASH")
+			return
+		}
+		result, err := a.DB.DB.Collection("withdrawals").UpdateOne(ctx, bson.M{"_id": fields[1], "status": "approved"}, bson.M{"$set": bson.M{"status": "paid", "tx_hash": strings.TrimSpace(fields[2]), "paid_at": time.Now().UTC(), "paid_by": msg.From.ID}})
+		if err != nil || result.MatchedCount == 0 {
+			a.sendPlain(ctx, msg.Chat.ID, "Withdrawal not found or not approved. Verify the transfer and Withdrawal ID first.")
+			return
+		}
+		a.sendWithKeyboard(ctx, msg.Chat.ID, "Withdrawal marked paid with the supplied transaction hash. The bot did not broadcast or verify the blockchain transaction.", AdminKeyboard())
+		return
+	}
+	if len(fields) != 2 {
+		a.sendPlain(ctx, msg.Chat.ID, "Usage: /approve_withdraw WITHDRAWAL_ID or /reject_withdraw WITHDRAWAL_ID")
+		return
+	}
+	fromStatuses := []string{"pending", "pending_review"}
+	result, err := a.DB.DB.Collection("withdrawals").UpdateOne(ctx, bson.M{"_id": fields[1], "status": bson.M{"$in": fromStatuses}}, bson.M{"$set": bson.M{"status": action, "reviewed_at": time.Now().UTC(), "reviewed_by": msg.From.ID}})
+	if err != nil || result.MatchedCount == 0 {
+		a.sendPlain(ctx, msg.Chat.ID, "Withdrawal not found or it has already been reviewed.")
+		return
+	}
+	a.sendWithKeyboard(ctx, msg.Chat.ID, "Withdrawal status updated: "+action+". Approval does not send funds; complete the transfer manually before marking paid.", AdminKeyboard())
+}
+
+func (a *App) handleThresholdCommand(ctx context.Context, msg *TelegramMessage, fields []string) {
+	if !a.requireAdmin(msg.Chat.ID, msg.From.ID) {
+		return
+	}
+	if len(fields) != 2 || !ValidateUSDTAmount(fields[1]) {
+		a.sendPlain(ctx, msg.Chat.ID, "Usage: /set_auto_withdraw_threshold AMOUNT (positive USDT amount)")
+		return
+	}
+	_, err := a.DB.DB.Collection("marketplace_settings").UpdateOne(ctx, bson.M{"_id": "auto_withdraw_threshold"}, bson.M{"$set": bson.M{"value": fields[1], "updated_at": time.Now().UTC(), "updated_by": msg.From.ID}}, options.Update().SetUpsert(true))
+	if err != nil {
+		a.sendPlain(ctx, msg.Chat.ID, "Could not save the threshold.")
+		return
+	}
+	a.sendWithKeyboard(ctx, msg.Chat.ID, "Automatic withdrawal threshold saved as "+fields[1]+" USDT. This is a stored setting; automatic payouts still require the wallet module.", AdminKeyboard())
 }
