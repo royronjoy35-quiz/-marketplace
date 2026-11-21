@@ -17,32 +17,28 @@ import (
 const maxTelegramUpdateBytes = 1 << 20
 
 const (
-	menuMarketplace        = "🛍 Marketplace"
-	menuProfile            = "👤 My Profile"
-	menuOrders             = "📦 My Orders"
-	menuEarnings           = "💰 My Earnings"
-	menuWithdraw           = "🏦 Withdraw"
-	menuSupport            = "🎧 Support"
-	menuCreateTask         = "➕ Create Task"
-	menuMyTasks            = "📋 My Tasks"
-	menuWorkerTasks        = "🧰 Available Tasks"
-	menuMyApplications     = "📋 My Applications"
-	menuMyWork             = "🧰 My Work"
-	menuSellerApplications = "👥 Applications"
-	menuSellerSubmissions  = "📨 Submissions"
-	menuAdmin              = "🛡 Admin Panel"
-	menuAdminDashboard     = "📊 Dashboard"
-	menuPending            = "🕒 Pending Tasks"
-	menuAdminUsers         = "👥 Manage Users"
-	menuAdminSellers       = "🏪 Manage Sellers"
-	menuAdminWorkers       = "🧰 Manage Workers"
-	menuAdminPayments      = "💳 Payment History"
-	menuAdminWithdrawals   = "🏦 Withdrawals"
-	menuAdminHistory       = "🧾 Transaction History"
-	menuAdminMarketplace   = "🛍 Manage Marketplace"
-	menuAdminSettings      = "⚙️ Settings"
-	menuMain               = "🏠 Main Menu"
-	menuCancel             = "❌ Cancel"
+	menuMarketplace      = "🛍 Marketplace"
+	menuProfile          = "👤 My Profile"
+	menuOrders           = "📦 My Orders"
+	menuEarnings         = "💰 My Earnings"
+	menuWithdraw         = "🏦 Withdraw"
+	menuSupport          = "🎧 Support"
+	menuCreateTask       = "➕ Create Task"
+	menuMyTasks          = "📋 My Tasks"
+	menuWorkerTasks      = "🧰 Available Tasks"
+	menuAdmin            = "🛡 Admin Panel"
+	menuAdminDashboard   = "📊 Dashboard"
+	menuPending          = "🕒 Pending Tasks"
+	menuAdminUsers       = "👥 Manage Users"
+	menuAdminSellers     = "🏪 Manage Sellers"
+	menuAdminWorkers     = "🧰 Manage Workers"
+	menuAdminPayments    = "💳 Payment History"
+	menuAdminWithdrawals = "🏦 Withdrawals"
+	menuAdminHistory     = "🧾 Transaction History"
+	menuAdminMarketplace = "🛍 Manage Marketplace"
+	menuAdminSettings    = "⚙️ Settings"
+	menuMain             = "🏠 Main Menu"
+	menuCancel           = "❌ Cancel"
 )
 
 type TelegramUpdate struct {
@@ -277,9 +273,9 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 			}
 			_ = a.TaskFlow.ClearSubmissionSession(ctx, msg.From.ID)
 			if app != nil {
-				a.sendPlain(ctx, app.SellerID, fmt.Sprintf("📥 New photo work submission received from Worker %d. Open Submissions to review it.", msg.From.ID))
+				a.sendPlain(ctx, app.SellerID, fmt.Sprintf("🔎 New proof from Worker %d was screened by the strict verification engine. Open Submissions to see the pre-check result and any risk flags.", msg.From.ID))
 			}
-			a.sendWithKeyboard(ctx, msg.Chat.ID, "✅ Your photo proof has been submitted to the Seller for review.", a.mainMenuKeyboard(ctx, msg.From.ID))
+			a.sendWithKeyboard(ctx, msg.Chat.ID, "🔎 Your proof was screened and saved. Duplicate or risky evidence is held automatically; actual task completion still requires Seller approval until a trusted provider API is connected.", a.mainMenuKeyboard(ctx, msg.From.ID))
 			return
 		}
 	}
@@ -297,9 +293,9 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 			}
 			_ = a.TaskFlow.ClearSubmissionSession(ctx, msg.From.ID)
 			if app != nil {
-				a.sendPlain(ctx, app.SellerID, fmt.Sprintf("📥 New work submission received from Worker %d. Open Submissions to review it.", msg.From.ID))
+				a.sendPlain(ctx, app.SellerID, fmt.Sprintf("🔎 New proof from Worker %d was screened by the strict verification engine. Open Submissions to see the pre-check result and any risk flags.", msg.From.ID))
 			}
-			a.sendWithKeyboard(ctx, msg.Chat.ID, "✅ Your work proof has been submitted to the Seller for review.", a.mainMenuKeyboard(ctx, msg.From.ID))
+			a.sendWithKeyboard(ctx, msg.Chat.ID, "🔎 Your proof was screened and saved. Duplicate or risky evidence is held automatically; actual task completion still requires Seller approval until a trusted provider API is connected.", a.mainMenuKeyboard(ctx, msg.From.ID))
 			return
 		}
 	}
@@ -322,7 +318,7 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, fmt.Sprintf("Welcome, %s! 🚀\n\nWelcome to ⒹⓇ Marketplace.\nYour account is registered.\n\nChoose an option from the menu below.", safeName(msg.From.FirstName)))
 		return
 	case "/help":
-		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, fmt.Sprintf("ⒹⓇ Marketplace Help\n\nUse the menu buttons to navigate.\nSend /seller to request Seller registration (%d Telegram Star(s)). Use /cancel to cancel an active task creation.", SellerRegistrationStars))
+		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, fmt.Sprintf("ⒹⓇ Marketplace Help\n\nUse the menu buttons to navigate.\nSend /seller to request Seller registration (%d Telegram Star(s)). Use /cancel to cancel an active task creation.\nAdmin/Seller task verification: /set_task_verification TASK_ID MODE VALUE", SellerRegistrationStars))
 		return
 	case "/status":
 		a.sendMainMenu(ctx, msg.Chat.ID, msg.From.ID, "ⒹⓇ Marketplace is online.")
@@ -379,6 +375,9 @@ func (a *App) ProcessUpdate(update TelegramUpdate) {
 		return
 	case "/mark_task_funded":
 		a.handleMarkTaskFunded(ctx, msg, fields)
+		return
+	case "/set_task_verification":
+		a.handleSetTaskVerification(ctx, msg, fields)
 		return
 	}
 
@@ -507,7 +506,7 @@ func (a *App) handleTaskDraft(ctx context.Context, msg *TelegramMessage, draft *
 			creatorRole = "admin"
 			status = TaskStatusActive
 		}
-		task := &Task{CreatorID: msg.From.ID, CreatorRole: creatorRole, Title: draft.Title, Description: draft.Description, RewardUSDT: draft.RewardUSDT, BudgetUSDT: CalculateTaskBudget(draft.RewardUSDT, draft.Slots), Slots: draft.Slots, Status: status, FundingStatus: "unfunded"}
+		task := &Task{CreatorID: msg.From.ID, CreatorRole: creatorRole, Title: draft.Title, Description: draft.Description, RewardUSDT: draft.RewardUSDT, BudgetUSDT: CalculateTaskBudget(draft.RewardUSDT, draft.Slots), Slots: draft.Slots, Status: status, FundingStatus: "unfunded", VerificationMode: VerificationManual}
 		if err := a.Marketplace.CreateTask(ctx, task); err != nil {
 			slog.Error("task creation failed", "error", err, "telegram_id", msg.From.ID)
 			a.sendPlain(ctx, msg.Chat.ID, "Task could not be saved. Please try again later.")
