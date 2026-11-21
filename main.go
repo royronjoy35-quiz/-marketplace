@@ -45,6 +45,13 @@ func main() {
 
 	bot := NewTelegramClient(cfg.BotToken)
 	app := NewApp(cfg, db, bot)
+	treasuryCtx, treasuryCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := app.Wallet.InitializeTreasury(treasuryCtx, cfg.TreasuryInitialUSDT); err != nil {
+		treasuryCancel()
+		logger.Error("owner treasury initialization failed", "error", err)
+		os.Exit(1)
+	}
+	treasuryCancel()
 
 	if cfg.PublicBaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
