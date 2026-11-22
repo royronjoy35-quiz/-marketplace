@@ -52,6 +52,25 @@ func (a *BotApp) sendText(ctx context.Context, b *bot.Bot, chatID int64, text st
 	})
 }
 
+// sendPhotoOrText restores the photo-caption presentation used by the Python bot.
+// If Telegram cannot fetch a configured image URL, it safely falls back to text.
+func (a *BotApp) sendPhotoOrText(ctx context.Context, b *bot.Bot, chatID int64, photo, caption string, markup models.ReplyMarkup) bool {
+	if strings.TrimSpace(photo) == "" {
+		a.sendText(ctx, b, chatID, caption, markup)
+		return false
+	}
+	_, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
+		ChatID: chatID, Photo: &models.InputFileString{Data: photo},
+		Caption: caption, ParseMode: models.ParseModeHTML, ReplyMarkup: markup,
+	})
+	if err != nil {
+		log.Printf("send configured photo to %d failed; falling back to text: %v", chatID, err)
+		a.sendText(ctx, b, chatID, caption, markup)
+		return false
+	}
+	return true
+}
+
 // StartHandler ports the supplied Python start() workflow, including referral capture,
 // first-time user creation, ban checks, and the distinct administrator dashboard.
 func (a *BotApp) StartHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -308,7 +327,7 @@ func (a *BotApp) userMenuMessage(ctx context.Context, b *bot.Bot, update *models
 		if err != nil {
 			a.sendText(ctx, b, chatID, "❌ Live Rates লোড করা যায়নি।", MainMenu())
 		} else {
-			a.sendText(ctx, b, chatID, rateText, MainMenu())
+			a.sendPhotoOrText(ctx, b, chatID, a.Config.PhotoRates, rateText, MainMenu())
 		}
 		return true
 	case "📥 Payment Methods":
@@ -325,7 +344,7 @@ func (a *BotApp) userMenuMessage(ctx context.Context, b *bot.Bot, update *models
 			}
 			lines = strings.Join(parts, "\n")
 		}
-		a.sendText(ctx, b, chatID, "📥 <b>বর্তমানে সচল পেমেন্ট মেথডসমূহ:</b>\n\n"+lines+"\n\n🔸 আপনি এই মাধ্যমগুলোর মাধ্যমে টাকা গ্রহণ করতে পারবেন।", MainMenu())
+		a.sendPhotoOrText(ctx, b, chatID, a.Config.PhotoMethods, "📥 <b>বর্তমানে সচল পেমেন্ট মেথডসমূহ:</b>\n\n"+lines+"\n\n🔸 আপনি এই মাধ্যমগুলোর মাধ্যমে টাকা গ্রহণ করতে পারবেন।", MainMenu())
 		return true
 	case "💸 Live Transactions":
 		markup := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{{Text: "💸 Live Transactions Channel", URL: a.Config.ChannelInviteLink}}}}
@@ -357,7 +376,7 @@ func (a *BotApp) userMenuMessage(ctx context.Context, b *bot.Bot, update *models
 		session := &SellSession{Step: "amount"}
 		sellSessions.Store(uid, session)
 		_ = saveWorkflowSession(ctx, a.DB, "sell", uid, session, 7*24*time.Hour)
-		a.sendText(ctx, b, chatID, fmt.Sprintf("🔸 আপনি কত পরিমাণ USDT বিক্রি করতে চান তা লিখুন।\n\nMinimum: <code>%s USDT</code> | Max: <code>%s USDT</code>", min, max), MainMenu())
+		a.sendPhotoOrText(ctx, b, chatID, a.Config.PhotoSellAmount, fmt.Sprintf("🔸 আপনি কত পরিমাণ USDT বিক্রি করতে চান তা লিখুন।\n\nMinimum: <code>%s USDT</code> | Max: <code>%s USDT</code>", min, max), MainMenu())
 		return true
 	case "📦 Order History":
 		a.OrderHistory(ctx, b, uid)
@@ -372,7 +391,7 @@ func (a *BotApp) userMenuMessage(ctx context.Context, b *bot.Bot, update *models
 		a.Leaderboard(ctx, b, uid)
 		return true
 	case "📞 Help & Support":
-		a.sendText(ctx, b, chatID, "📞 <b>Help & Support Center</b>\n\nআপনার প্রয়োজন অনুযায়ী নিচের একটি অপশন নির্বাচন করুন।", SupportMenu())
+		a.sendPhotoOrText(ctx, b, chatID, a.Config.PhotoSupport, "📞 <b>Help & Support Center</b>\n\nআপনার প্রয়োজন অনুযায়ী নিচের একটি অপশন নির্বাচন করুন।", SupportMenu())
 		return true
 	case "🧮 Rate Calculator":
 		a.CalculatorCommandHandler(ctx, b, update)
@@ -435,6 +454,11 @@ func (a *BotApp) MessageHandler(ctx context.Context, b *bot.Bot, update *models.
 	msg := update.Message
 	user := msg.From
 	chatID := msg.Chat.ID
+	// Route an active support-ticket reply before other admin input sessions.
+	// Otherwise a pending admin setting/rejection handler can consume the reply.
+	if a.SupportMessageHandler(ctx, b, update) {
+		return
+	}
 	if a.AdminMessageHandler(ctx, b, update) {
 		return
 	}
@@ -452,9 +476,6 @@ func (a *BotApp) MessageHandler(ctx context.Context, b *bot.Bot, update *models.
 		text = strings.TrimSpace(msg.Caption)
 	}
 	if a.userMenuMessage(ctx, b, update, text) {
-		return
-	}
-	if a.SupportMessageHandler(ctx, b, update) {
 		return
 	}
 	if a.handlePayoutNumberMessage(ctx, b, update) {
@@ -747,7 +768,7 @@ func (a *BotApp) CallbackHandler(ctx context.Context, b *bot.Bot, update *models
 		if remaining.IsNegative() {
 			remaining = decimal.Zero
 		}
-		fullName := telegramFullName(&q.From)
+		fullName := telegramFullName(q.From)
 		adminNotice := fmt.Sprintf("📨 <b>Daily Sell Limit Increase Request</b>\n\n👤 User: <b>%s</b>\n🏷️ Username: <b>@%s</b>\n🆔 User ID: <code>%d</code>\n📅 আজকের Daily Limit: <b>%s USDT</b>\n✅ আজ ইতিমধ্যে বিক্রি: <b>%s USDT</b>\n📉 বর্তমানে বাকি: <b>%s USDT</b>\n💰 User-এর চাওয়া Sell Amount: <b>%s USDT</b>\n\nঅনুগ্রহ করে সিদ্ধান্ত নিন:", safeText(fullName), safeText(q.From.Username), userID, daily, sold, remaining, requested)
 		limitKB := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{{Text: "✅ Receive this", CallbackData: fmt.Sprintf("accept_limit:%d:%s", userID, requested)}, {Text: "❌ Reject Request", CallbackData: fmt.Sprintf("reject_limit:%d", userID)}}}}
 		if _, sendErr := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: a.Config.AdminID, Text: adminNotice, ParseMode: models.ParseModeHTML, ReplyMarkup: limitKB}); sendErr != nil {
@@ -880,7 +901,7 @@ func (a *BotApp) handleSellProof(ctx context.Context, b *bot.Bot, update *models
 	adminMarkup := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{{Text: "✅ Approve", CallbackData: fmt.Sprintf("approve:%d", oid)}, {Text: "❌ Reject Request", CallbackData: fmt.Sprintf("reject:%d", oid)}}}}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: a.Config.AdminID, Text: adminText, ParseMode: models.ParseModeHTML, ReplyMarkup: adminMarkup})
 	a.clearSession(ctx, user.ID)
-	a.sendText(ctx, b, chatID, fmt.Sprintf("📦 Order <code>#%d</code>\n\n✅ Successfully submitted.\n⏳ Waiting for admin approval...\n🔸 দয়া করে কিছুক্ষণ অপেক্ষা করুন 🙏", oid), MainMenu())
+	a.sendPhotoOrText(ctx, b, chatID, a.Config.PhotoOrderSubmitted, fmt.Sprintf("📦 Order <code>#%d</code>\n\n✅ Successfully submitted.\n⏳ Waiting for admin approval...\n🔸 দয়া করে কিছুক্ষণ অপেক্ষা করুন 🙏", oid), MainMenu())
 }
 
 func safeText(value string) string {
@@ -1025,7 +1046,7 @@ func (a *BotApp) ReferralDashboard(ctx context.Context, b *bot.Bot, userID int64
 		rows = append(rows, []models.InlineKeyboardButton{{Text: "💳 Transfer Referral Balance to Wallet", CallbackData: "withdraw_refer_to_wallet"}})
 	}
 	markup := &models.InlineKeyboardMarkup{InlineKeyboard: rows}
-	a.sendText(ctx, b, userID, text, markup)
+	a.sendPhotoOrText(ctx, b, userID, a.Config.PhotoRefer, text, markup)
 }
 
 func (a *BotApp) ReferralCallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update) bool {
@@ -1113,5 +1134,5 @@ func (a *BotApp) Profile(ctx context.Context, b *bot.Bot, user *models.User) {
 	wallet, _ := decimal.NewFromString(orderString(u, "mini_wallet", "0"))
 	bonus := orderString(u, "referral_bonus_bdt", "0")
 	text := fmt.Sprintf("👤 <b>Your Account Overview</b>\n\n🆔 <b>User ID:</b> <code>%d</code>\n🏷️ <b>Name:</b> <b>%s</b>\n🔗 <b>Username:</b> <b>@%s</b>\n💳 <b>Wallet Balance:</b> ৳<code>%s</code>\n📅 <b>Joined Date:</b> <i>%s</i>\n\n📊 <b>Account Activity</b>\n• <b>Successful Orders:</b> %d Times\n• <b>Total USDT Sold:</b> <code>%s</code> USDT\n• <b>Total BDT Received:</b> ৳<code>%s</code> BDT\n• <b>Active Support Tickets:</b> %d\n\n👥 <b>Referral Summary</b>\n• <b>Valid Referrals:</b> %d Users\n• <b>Current Refer Bonus:</b> ৳<code>%s</code>", uid, htmlEscape(name), htmlEscape(username), Money(wallet), htmlEscape(orderString(u, "created_at", "N/A")), count, totalUSDT.String(), Money(totalBDT), openTickets, orderInt64(u, "valid_referrals"), htmlEscape(bonus))
-	a.sendText(ctx, b, uid, text, &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{{Text: "💳 My Payment Numbers", CallbackData: "my_payment_numbers"}}}})
+	a.sendPhotoOrText(ctx, b, uid, a.Config.PhotoProfile, text, &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{{Text: "💳 My Payment Numbers", CallbackData: "my_payment_numbers"}}}})
 }
