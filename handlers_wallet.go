@@ -71,7 +71,7 @@ func (a *BotApp) showWallet(ctx context.Context, b *bot.Bot, userID, chatID int6
 	}
 	balance, _ := decimal.NewFromString(strings.ReplaceAll(fmt.Sprint(user["mini_wallet"]), ",", ""))
 	text := fmt.Sprintf("💳 <b>Wallet Dashboard</b>\n\n• বর্তমান ওয়ালেট ব্যালেন্স: ৳<b>%s</b>\n• সর্বনিম্ন withdraw ৳৫০\n\n", Money(balance))
-	a.sendText(ctx, b, chatID, text, walletKeyboard(balance))
+	a.sendPhotoOrText(ctx, b, chatID, a.Config.PhotoWallet, text, walletKeyboard(balance))
 }
 
 func (a *BotApp) showPaymentNumbers(ctx context.Context, b *bot.Bot, userID int64) {
@@ -301,9 +301,9 @@ func (a *BotApp) submitWalletWithdraw(ctx context.Context, b *bot.Bot, userID in
 	walletSessions.Delete(userID)
 	_ = deleteWorkflowSession(ctx, a.DB, "wallet", userID)
 	if strings.HasPrefix(number, "Photo [File ID:") {
-		a.sendText(ctx, b, userID, fmt.Sprintf("🏧 Withdraw ID: <code>#%d</code>\n💳 Payout: <b>%s</b>\n🖼️ Bangla QR photo received.\n\n✅ আপনার Withdraw request সফলভাবে জমা হয়েছে।\n⏳ অ্যাডমিন পেমেন্ট পাঠানো পর্যন্ত অপেক্ষা করুন।", s.WithdrawID, methodDisplay), MainMenu())
+		a.sendPhotoOrText(ctx, b, userID, a.Config.PhotoWithdrawSubmitted, fmt.Sprintf("🏧 Withdraw ID: <code>#%d</code>\n💳 Payout: <b>%s</b>\n🖼️ Bangla QR photo received.\n\n✅ আপনার Withdraw request সফলভাবে জমা হয়েছে।\n⏳ অ্যাডমিন পেমেন্ট পাঠানো পর্যন্ত অপেক্ষা করুন।", s.WithdrawID, methodDisplay), MainMenu())
 	} else {
-		a.sendText(ctx, b, userID, fmt.Sprintf("🏧 Withdraw ID: <code>#%d</code>\n💳 Payout: <b>%s</b> (<code>%s</code>)\n\n✅ আপনার Withdraw request সফলভাবে জমা হয়েছে।\n⏳ অ্যাডমিন পেমেন্ট পাঠানো পর্যন্ত অপেক্ষা করুন।", s.WithdrawID, methodDisplay, numberDisplay), MainMenu())
+		a.sendPhotoOrText(ctx, b, userID, a.Config.PhotoWithdrawSubmitted, fmt.Sprintf("🏧 Withdraw ID: <code>#%d</code>\n💳 Payout: <b>%s</b> (<code>%s</code>)\n\n✅ আপনার Withdraw request সফলভাবে জমা হয়েছে।\n⏳ অ্যাডমিন পেমেন্ট পাঠানো পর্যন্ত অপেক্ষা করুন।", s.WithdrawID, methodDisplay, numberDisplay), MainMenu())
 	}
 }
 
