@@ -74,7 +74,7 @@ func (a *BotApp) showWallet(ctx context.Context, b *bot.Bot, userID, chatID int6
 	a.sendPhotoOrText(ctx, b, chatID, a.Config.PhotoWallet, text, walletKeyboard(balance))
 }
 
-func (a *BotApp) showPaymentNumbers(ctx context.Context, b *bot.Bot, userID int64) {
+func (a *BotApp) paymentNumbersView(ctx context.Context, userID int64) (string, *models.InlineKeyboardMarkup) {
 	var user bson.M
 	_ = a.DB.Users.FindOne(ctx, bson.M{"user_id": userID}).Decode(&user)
 	numbers := map[string]interface{}{}
@@ -102,7 +102,12 @@ func (a *BotApp) showPaymentNumbers(ctx context.Context, b *bot.Bot, userID int6
 		rows = append(rows, []models.InlineKeyboardButton{{Text: "✏️ Edit " + method, CallbackData: "payment_number_edit:" + method}})
 	}
 	rows = append(rows, []models.InlineKeyboardButton{{Text: "✖️ Close", CallbackData: "payment_numbers_close"}})
-	a.sendText(ctx, b, userID, strings.Join(lines, "\n"), &models.InlineKeyboardMarkup{InlineKeyboard: rows})
+	return strings.Join(lines, "\n"), &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func (a *BotApp) showPaymentNumbers(ctx context.Context, b *bot.Bot, userID int64) {
+	text, markup := a.paymentNumbersView(ctx, userID)
+	a.sendText(ctx, b, userID, text, markup)
 }
 
 func normalizeBDMobile(value string) (string, bool) {
@@ -370,7 +375,9 @@ func (a *BotApp) WalletCallbackHandler(ctx context.Context, b *bot.Bot, update *
 		walletSessions.Delete(uid)
 		_ = deleteWorkflowSession(ctx, a.DB, "wallet", uid)
 		answer("পরিবর্তন বাতিল করা হয়েছে।", false)
-		a.showPaymentNumbers(ctx, b, uid)
+		viewText, viewMarkup := a.paymentNumbersView(ctx, uid)
+		// Restore the existing prompt message instead of sending a duplicate.
+		a.editCallbackWorkflowPrompt(ctx, b, q, viewText, viewMarkup)
 		return true
 	case strings.HasPrefix(data, "payment_number_edit:"):
 		method := strings.TrimPrefix(data, "payment_number_edit:")
