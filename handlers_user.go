@@ -85,7 +85,7 @@ func (a *BotApp) editWorkflowPrompt(ctx context.Context, b *bot.Bot, chatID int6
 }
 
 func (a *BotApp) editCallbackWorkflowPrompt(ctx context.Context, b *bot.Bot, q *models.CallbackQuery, text string, markup models.ReplyMarkup) {
-	if q != nil && q.Message != nil && q.Message.Message != nil {
+	if q != nil && q.Message.Message != nil {
 		m := q.Message.Message
 		var err error
 		if len(m.Photo) > 0 {
